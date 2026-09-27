@@ -284,6 +284,10 @@ object XiaoAi {
         wavBase64: String? = null,
         followUps: List<String> = emptyList(),
         usePreparedQueue: Boolean = false,
+        /** 每一步之间的固定等待（毫秒）。小爱需要时间理解/跳转/开始下一轮。 */
+        stepMs: Long = 5000L,
+        /** 未跳转时最多补点几次麦克风。 */
+        maxRetry: Int = 3,
     ): Outcome {
         val callStart = System.currentTimeMillis()
         if (instruction.isBlank()) return Outcome(false, "input", "指令为空")
@@ -328,22 +332,33 @@ object XiaoAi {
         try {
             if (!launch()) return Outcome(false, "launch", "唤起超级小爱失败")
 
-            // 语音是实时喂的：先等播完，再等画面稳定（疑似完成），不再固定 sleep
+            // 节奏：每一步之间固定等 stepMs（默认 5 秒）。
+            // 小爱需要时间理解、跳转、再开始听下一轮，等太短会白点。
             val playMs = XiaoAiVoice.durationMs.toLong() + 600
-            var after = waitStable(playMs, waitMs.coerceIn(4000, 60000))
+            var after = waitStable(playMs, playMs + 4000)
 
-            // 页面没跳转 => 小爱没往下走，补点麦克风开下一轮，
-            // 注入队列会自动把下一段（如"确认"）喂进去。最多补 3 次。
+            // ① 首轮指令播完后，固定等 stepMs
+            Lg.i("首轮语音已播完，等待 " + stepMs + "ms 让小爱理解/跳转")
+            Thread.sleep(stepMs)
+            after = FrameHub.recognizeNow(true)
+
             val baseTexts = textSet(FrameHub.model.value)
             var retries = 0
-            while (retries < 3 && similarity(baseTexts, textSet(after)) > 0.80) {
+            // ② 页面没跳转 => 补点麦克风重发；同样每次都等 stepMs
+            while (retries < maxRetry) {
+                val same = similarity(baseTexts, textSet(after)) > 0.80
+                if (!same) {
+                    Lg.i("检测到页面已跳转，停止补点")
+                    break
+                }
                 retries++
-                Lg.i("未检测到页面跳转，第 $retries 次补点麦克风图标")
+                Lg.i("未检测到跳转，第 " + retries + " 次补点麦克风（下一段语音会在新一轮录音时注入）")
                 if (!tapMicIcon(after)) break
-                after = waitStable(1500, (waitMs / 2).coerceIn(3000, 30000))
-                if (similarity(baseTexts, textSet(after)) <= 0.80) break
+                Lg.i("补点后等待 " + stepMs + "ms")
+                Thread.sleep(stepMs)
+                after = FrameHub.recognizeNow(true)
             }
-            if (retries > 0) Lg.i("补点麦克风共 $retries 次")
+            if (retries > 0) Lg.i("补点麦克风共 " + retries + " 次")
 
             // 疑似完成：画面稳定后再完整识别一次，给出判定与屏幕文字
             val (verdict, hit, screen) = analyzeFinal(after)

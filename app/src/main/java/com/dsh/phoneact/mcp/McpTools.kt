@@ -120,6 +120,9 @@ object McpTools {
                 .put("wait_ms", p("integer", "注入后等待小爱执行的毫秒数", 15000))
                 .put("wav_base64", p("string", "可选：外部合成好的 16bit PCM WAV（base64）。一般不用，留空走 TTS"))
                 .put("use_prepared", p("boolean", "true=使用 xiaoi_tts_set 备好的队列，不再合成", false))
+                .put("step_ms", p("integer", "每一步之间的固定等待毫秒（默认 5000）。" +
+                    "指令播完等 5s；补点麦克风（重发/确认）后同样等 5s", 5000))
+                .put("max_retry", p("integer", "未跳转时最多补点几次麦克风", 3))
                 .put("follow_ups", JSONObject()
                     .put("type", "array")
                     .put("description", "后续轮次要说的内容。小爱的技能会多轮追问，默认追加「确认」")
@@ -600,7 +603,9 @@ object McpTools {
         val followUps = if (arr != null) (0 until arr.length()).mapNotNull { arr.optString(it).ifBlank { null } }
         else listOf("确认")
         val usePrepared = args.optBoolean("use_prepared", false)
-        val o = XiaoAi.askByVoice(instruction, waitMs, wav, followUps, usePrepared)
+        val stepMs = args.optLong("step_ms", 5000L).coerceIn(1000L, 30000L)
+        val maxRetry = args.optInt("max_retry", 3).coerceIn(0, 6)
+        val o = XiaoAi.askByVoice(instruction, waitMs, wav, followUps, usePrepared, stepMs, maxRetry)
         Lg.i("xiaoi_voice_task 「$instruction」 -> ${o.stage} ${if (o.ok) "成功" else "失败"}")
         return if (o.ok) ToolResult.json(XiaoAi.outcomeJson(o)) else ToolResult.error("${o.stage}: ${o.detail}")
     }
