@@ -11,13 +11,14 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * 把文字合成为语音 PCM，供 Xposed 侧注入到超级小爱的录音流里。
+ * 语音片段仓库：把文字合成为 PCM，交给 Xposed 侧替换**任意被注入 App** 的录音流。
  *
- * 小爱对"发消息/打电话"这类能力只认语音，且技能多为**多轮追问**
- * （例如先问发给谁说啥，再问"确认发送吗"）。因此这里维护的是一个**语音队列**：
- * 每一轮新的录音会话依次取下一段，而不是反复播同一句。
+ * 这里维护的是一个**队列**：每开一次新的录音会话就依次取下一段，
+ * 因为目标 App 的语音交互常常是多轮的（先问内容、再问确认）。
+ *
+ * 与具体 App 无关 —— 谁在 LSPosed 作用域里、谁开了麦克风，谁就会被喂到。
  */
-object XiaoAiVoice {
+object VoiceClip {
 
     private const val TTS_RATE = 16000
 
@@ -32,7 +33,7 @@ object XiaoAiVoice {
      * 动态 hook 的开关。
      *
      * 只有 armed=true 时，被注入进程才会在录音会话里取用语音队列。
-     * 这样 agent 可以"先武装 -> 用任意方式唤起小爱 -> 观察 -> 决定补点 -> 收工卸下"，
+     * 这样 agent 可以"先武装 -> 用任意方式让目标 App 开麦 -> 观察 -> 决定补发 -> 收工卸下"，
      * 而不是把整条编排流程写死在某个工具里。
      */
     @Volatile private var armedFlag: Boolean = false
@@ -63,7 +64,7 @@ object XiaoAiVoice {
     val hasClip: Boolean get() = clips.isNotEmpty()
     val durationMs: Int get() = clips.firstOrNull()?.durationMs ?: 0
 
-    fun clipFile(i: Int): File = File(PhoneActApp.instance.filesDir, "xiaoi_voice_$i.pcm")
+    fun clipFile(i: Int): File = File(PhoneActApp.instance.filesDir, "clip_$i.pcm")
 
     fun resetQueue() {
         clips.forEachIndexed { i, _ -> runCatching { clipFile(i).delete() } }
@@ -84,23 +85,12 @@ object XiaoAiVoice {
     /** 追加一段语音（本机 TTS 失败则回退 PC 端服务）。 */
     fun appendFromText(text: String): Boolean {
         if (text.isBlank()) return true
-        val pcm = synthLocal(text) ?: synthFromServer(text) ?: return false
+        val local = synthLocal(text)
+        // 本机失败时 lastError 会留痕，回退成功后要清掉，否则 metaJson 里会一直挂着陈旧错误
+        val pcm = local ?: (synthFromServer(text)?.also { lastError = "" }) ?: return false
+        lastError = ""
         appendPcm(pcm)
         return true
-    }
-
-    /**
-     * 追加内置触发词（assets/xiaoi_trigger.b64，约 1 秒的"你好"）。
-     * 用途：走语音路径但不想让 ASR 去听一整句时，只喂一个短触发词出结果，
-     * 真正的指令由输入层 hook 替换。
-     */
-    fun appendTriggerBlip(): Boolean = try {
-        val b64 = PhoneActApp.instance.assets.open("xiaoi_trigger.b64")
-            .use { String(it.readBytes(), Charsets.UTF_8) }.trim()
-        if (b64.isEmpty()) { lastError = "触发词资源为空"; false } else appendFromWavBase64(b64)
-    } catch (t: Throwable) {
-        lastError = "载入触发词失败: ${t.message}"
-        false
     }
 
     /** 直接用外部合成好的 WAV（base64）追加一段。 */
@@ -131,7 +121,7 @@ object XiaoAiVoice {
     private fun synthLocal(text: String): ByteArray? {
         lastError = ""
         val ctx: Context = PhoneActApp.instance
-        val wav = File(ctx.cacheDir, "xiaoi_tts.wav")
+        val wav = File(ctx.cacheDir, "clip_tts.wav")
         if (wav.exists()) wav.delete()
         var tts: TextToSpeech? = null
         return try {

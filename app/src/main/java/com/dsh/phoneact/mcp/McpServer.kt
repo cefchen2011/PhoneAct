@@ -41,7 +41,6 @@ object McpServer {
             this.port = port
             this.bindAll = bindAll
             running = true
-            com.dsh.phoneact.core.McpServerHolder.running = true
             lastError = ""
             Lg.i("MCP 服务已启动: ${if (bindAll) "0.0.0.0" else "127.0.0.1"}:$port/mcp")
             true
@@ -59,7 +58,6 @@ object McpServer {
         runCatching { http?.stop() }
         http = null
         running = false
-        com.dsh.phoneact.core.McpServerHolder.running = false
     }
 
     fun localAddresses(): List<String> {

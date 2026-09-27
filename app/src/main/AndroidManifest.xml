@@ -91,10 +91,10 @@
             </intent-filter>
         </receiver>
 
-        <!-- 把 TTS 合成的语音交给被注入的小爱进程（短时数据，不含隐私） -->
+        <!-- 把 TTS 合成的语音片段交给被注入的目标进程（短时数据，不含隐私） -->
         <provider
-            android:name=".xposed.XiaoAiAudioProvider"
-            android:authorities="${applicationId}.xiaoi"
+            android:name=".xposed.ClipProvider"
+            android:authorities="${applicationId}.clip"
             android:exported="true" />
 
         <!-- 脚本化控制入口：需携带 MCP 令牌 -->

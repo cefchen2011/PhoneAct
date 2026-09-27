@@ -6,10 +6,10 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
-import com.dsh.phoneact.core.XiaoAiVoice
+import com.dsh.phoneact.core.VoiceClip
 
 /**
- * 把合成的语音 PCM 交给被注入的小爱进程。
+ * 把语音片段 PCM 交给被注入的目标进程。
  *
  * 为什么用 ContentProvider：跨进程传几百 KB 的音频，
  * 广播有 Binder 1MB 限制、文件共享又受 SELinux 与应用沙箱限制，
@@ -17,23 +17,20 @@ import com.dsh.phoneact.core.XiaoAiVoice
  *
  * 数据是"用户自己下的指令"的 TTS 音频，短时存在，不含隐私，因此不额外设权限。
  */
-class XiaoAiAudioProvider : ContentProvider() {
+class ClipProvider : ContentProvider() {
 
     override fun onCreate(): Boolean = true
 
     /** content://<auth>/pcm?i=<轮次> —— 多轮对话每轮取一段。 */
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
         val i = uri.getQueryParameter("i")?.toIntOrNull() ?: 0
-        val f = XiaoAiVoice.clipFile(i)
+        val f = VoiceClip.clipFile(i)
         if (!f.exists() || f.length() == 0L) return null
         return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
     }
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle =
-        Bundle().apply {
-            putString("meta", XiaoAiVoice.metaJson().toString())
-            putString("query", com.dsh.phoneact.core.XiaoAi.pendingJson().toString())
-        }
+        Bundle().apply { putString("meta", VoiceClip.metaJson().toString()) }
 
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? = null
     override fun getType(uri: Uri): String = "application/octet-stream"

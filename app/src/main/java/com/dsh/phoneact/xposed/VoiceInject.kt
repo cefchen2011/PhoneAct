@@ -8,19 +8,19 @@ import java.io.FileInputStream
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * 在被注入的小爱进程里，把 AudioRecord 读到的麦克风数据替换成我们合成的语音。
+ * 动态 hook 的执行端：在**任意被注入的进程**里，把 AudioRecord 读到的麦克风数据
+ * 替换成宿主合成的语音。
  *
- * 为什么这样做：超级小爱对"发消息/打电话"等能力只认语音，文字指令会被拒；
- * 而它内部用的是自研引擎（不走标准 SpeechRecognizer），录音类还是混淆的。
- * 与其逆向它的私有 ASR 回调，不如在**框架层**动手 ——
- * hook android.media.AudioRecord 对所有 Java 层录音都有效，且不依赖版本内部结构。
+ * 为什么做在框架层：多数 App 的录音/语音交互都走 android.media.AudioRecord，
+ * 在框架层 hook 对 Java 层录音一律有效，不依赖任何 App 的内部结构或版本。
  *
- * 数据来源：宿主 App 通过 XiaoAiAudioProvider 提供 TTS 合成的 PCM。
- * 触发时机：每次 startRecording() 时查一次序号，有新的就载入。
+ * 数据来源：宿主 App 通过 ClipProvider 提供 TTS 合成的 PCM。
+ * 触发时机：每次 startRecording() 时查一次 meta —— 没武装就完全不碰数据。
+ * 作用范围：armed=true 且（target 为空 或 target == 本进程包名）。
  */
 object VoiceInject {
 
-    private const val AUTHORITY = "com.dsh.phoneact.xiaoi"
+    private const val AUTHORITY = "com.dsh.phoneact.clip"
     private const val KEY_SEQ = "phoneact_inject_seq"
 
     /** 当前任务已经喂到第几轮（多轮对话会多次 startRecording）。 */
@@ -40,8 +40,8 @@ object VoiceInject {
     @Volatile var lastInfo: String = ""
         private set
 
-    /** 一次注入结束后，再补这么多字节的静音，让小爱的 VAD 判定"说完了"。 */
-    // 小爱的录音窗口只有约 5 秒，语音 + 静音必须留有余量
+    /** 一次注入结束后，再补这么多字节的静音，让对方的 VAD 判定"说完了"。 */
+    // 目标 App 的录音窗口通常只有几秒，语音 + 静音必须留有余量
     private const val TAIL_SILENCE_BYTES = 16000 * 2 * 3 / 5   // 约 0.6 秒 @16k/16bit（单声道字节数）
 
     /**
@@ -50,7 +50,7 @@ object VoiceInject {
      * 实测（关键）：直接从头喂语音时，**开头的字会被吞掉** ——
      *   真人 ASR: 给SUNSHINE发微信说你好
      *   注入 ASR: SUNSHINE发微信说你好     <- "给" 丢了
-     * 丢首字会改变意图判定，小爱就不会走到"交棒微信"那一步。
+     * 丢首字会改变意图判定，后续的语音交互就拿不到完整指令。
      * 前面垫 0.4 秒静音后首字保留。
      */
     private const val LEAD_SILENCE_BYTES = 16000 * 2 * 2 / 5   // 约 0.4 秒
@@ -93,7 +93,7 @@ object VoiceInject {
         val seq = meta.optLong("seq", 0L)
         val count = meta.optInt("count", 0)
         if (seq <= 0L || count <= 0) return
-        // 新任务 -> 轮次归零；否则沿用进度（小爱的技能多为多轮追问，
+        // 新任务 -> 轮次归零；否则沿用进度（多轮语音交互每轮会重新 startRecording，
         // 每轮都会重新 startRecording，必须逐轮喂不同的音频）
         if (seq != loadedSeq) {
             loadedSeq = seq
@@ -113,7 +113,7 @@ object VoiceInject {
 
         val srcRate = meta.optInt("sampleRate", 16000).coerceAtLeast(8000)
         val devRate = runCatching { rec.sampleRate }.getOrDefault(16000).coerceAtLeast(8000)
-        // 实测小爱用 CHANNEL_IN_2POINT0POINT2（getChannelCount()=4），所以不能只处理 1/2 声道
+        // 实测目标 App 可能用多声道采集（如 CHANNEL_IN_2POINT0POINT2，getChannelCount()=4），不能只处理 1/2 声道
         val channels = runCatching { rec.channelCount }.getOrDefault(1).coerceIn(1, 8)
 
         var data = if (srcRate == devRate) raw else resample(raw, srcRate, devRate)
@@ -222,7 +222,7 @@ object VoiceInject {
     /**
      * 单声道 -> n 声道。
      *
-     * 实测（小爱 7.13.33）：把同一份样本复制到全部 4 个声道时，ASR 返回空
+     * 实测：把同一份样本复制到全部 4 个声道时，对方 ASR 返回空
      * （recordQueryInfo error: query=），而真人说话正常。
      * 怀疑多麦阵列做了差分/波束成形处理，4 路同相信号会被抵消。
      * 因此默认只把语音放进第 0 声道，其余声道置零 —— 由 CH_MODE 控制，便于对比验证。

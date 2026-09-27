@@ -47,11 +47,10 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
                 hookContentUpdates(lp)
                 if (lp.packageName == "com.android.systemui") hookMediaProjectionConsent(lp)
 
-                // 动态 hook：**所有**被注入的进程都挂上音频注入与查询改写，
+                // 动态 hook：**所有**被注入的进程都挂上录音数据替换，
                 // 具体对哪个应用生效由 MCP 运行时指定（arm/disarm 即时生效，不需要重启应用）。
                 // 需要 LSPosed 作用域包含目标应用 —— 这是一次性配置，之后都是运行时控制。
                 hookAudioInject(lp)
-                hookQueryInput(lp)
             }
         } catch (t: Throwable) {
             lastError = "${lp.packageName}: ${t.message}"
@@ -115,7 +114,6 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
     private fun hookAudioInject(lp: XC_LoadPackage.LoadPackageParam) {
         // 让注入侧知道"我是谁"，供 MCP 的目标包过滤使用
         VoiceInject.processPackage = lp.packageName
-        QueryInject.processPackage = lp.packageName
         val cls = XposedHelpers.findClassIfExists("android.media.AudioRecord", lp.classLoader) ?: return
         XposedHelpers.findAndHookMethod(cls, "startRecording", object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
@@ -214,131 +212,8 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
             )
         }.onFailure { log("hook read(ByteBuffer,int,int) 失败 $it") }
 
-        installed.add("AudioRecord(小爱语音注入)")
-        log("已挂载 AudioRecord hook 到 $XIAOI_PACKAGE")
-    }
-
-    // ------------------------------------------------------------------
-    // 5. 输入层注入：改写小爱拿到的 QueryInfo
-    // ------------------------------------------------------------------
-
-    /**
-     * 输入层 hook。
-     *
-     * 上一版只挂 QueryInfo 构造器：结果发现构造时 queryText 还是空的
-     * （小爱是先建一个空 QueryInfo，随后通过 setter / notify 方法填内容），
-     * 所以改为挂"文本入口方法"，在方法调用前直接改写参数。
-     */
-    private fun hookQueryInput(lp: XC_LoadPackage.LoadPackageParam) {
-        // [类名, 方法名]，混淆名随版本变化，找不到就跳过并记日志
-        val targets = listOf(
-            "y00.u0" to "setQueryText",
-            "b20.h" to "notifyQueryText",
-            "b20.h" to "addQueryCard",
-            "b20.h" to "addQueryCardFromEditBar",
-            "com.xiaomi.voiceassistant.u1\$a" to "notifyQueryText",
-            "sh0.n1" to "notifyQueryText",
-        )
-        var hooked = 0
-        for ((clsName, methodName) in targets) {
-            val cls = XposedHelpers.findClassIfExists(clsName, lp.classLoader) ?: continue
-            runCatching {
-                val set = XposedBridge.hookAllMethods(cls, methodName, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        runCatching { onQueryTextEntry(clsName, methodName, param) }
-                            .onFailure { log("QueryText hook 异常 $it") }
-                    }
-                })
-                if (!set.isNullOrEmpty()) {
-                    hooked += set.size
-                    log("输入层 hook: $clsName.$methodName (${set.size} 个重载)")
-                }
-            }.onFailure { log("hook $clsName.$methodName 失败 $it") }
-        }
-        // 唤起来源全串：小爱判"要不要交棒微信"看的就是它
-        runCatching {
-            val a6 = XposedHelpers.findClassIfExists("com.xiaomi.voiceassistant.utils.a6", lp.classLoader)
-            if (a6 != null) {
-                for (m in listOf("getWakeUpOrigin", "getQueryOrigin", "getLastQueryOrigin")) {
-                    val set = XposedBridge.hookAllMethods(a6, m, object : XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            val cur = param.result as? String
-                            val ov = QueryInject.wakeOriginOverride
-                            if (ov != null && cur != ov) {
-                                param.result = ov
-                                if (QueryInject.bumpHookCount() % 20L == 1L) log("★ 唤起来源覆盖 -> $ov")
-                            }
-                        }
-                    })
-                    if (!set.isNullOrEmpty()) log("来源读取 hook: a6.$m (${set.size})")
-                }
-            }
-        }.onFailure { log("挂来源读取 hook 失败 $it") }
-
-        // 查询来源（文字 / 语音）—— 小能的另一道门禁
-        for ((clsName, methodName) in listOf(
-            "com.xiaomi.voiceassistant.utils.a6" to "setQueryOrigin",
-            "com.xiaomi.voiceassistant.utils.a6" to "setWakeUpOrigin",
-            "com.xiaomi.voiceassistant.utils.a6" to "setLastQueryOrigin",
-        )) {
-            val cls = XposedHelpers.findClassIfExists(clsName, lp.classLoader) ?: continue
-            runCatching {
-                val set = XposedBridge.hookAllMethods(cls, methodName, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val v = param.args?.firstOrNull() as? String ?: return
-                        log("QueryOrigin " + methodName + " = " + v)
-                        val override = QueryInject.takeOriginOverride()
-                        if (override != null) {
-                            param.args[0] = override
-                            log("★ QueryOrigin 覆盖 -> " + override)
-                        }
-                    }
-                })
-                if (!set.isNullOrEmpty()) {
-                    hooked += set.size
-                    log("来源 hook: $clsName.$methodName (${set.size})")
-                }
-            }.onFailure { log("hook $clsName.$methodName 失败 $it") }
-        }
-
-        if (hooked > 0) {
-            installed.add("输入层注入($hooked 个入口)")
-            log("已挂载输入层 hook：$hooked 个入口方法")
-        } else {
-            log("未找到任何输入层入口方法，输入层注入不可用")
-        }
-    }
-
-    private fun onQueryTextEntry(clsName: String, methodName: String, param: XC_MethodHook.MethodHookParam) {
-        val args = param.args ?: return
-        val idx = args.indexOfFirst { it is String }
-        if (idx < 0) return
-        val text = args[idx] as String
-        if (text.isEmpty()) return
-
-        // 关键一步：把"来自 AI 输入框"标记清掉，让小爱以为这是语音说出来的。
-        // 实测文字指令会被回绝："微信发消息…当前仅支持语音对话方式"。
-        if (clsName == "y00.u0") {
-            val obj = param.thisObject ?: return
-            val before = runCatching { XposedHelpers.getBooleanField(obj, "d") }.getOrDefault(false)
-            if (before) {
-                XposedHelpers.setBooleanField(obj, "d", false)
-                log("★ 来源伪造：isFromAiInputPage true -> false（" + text.take(30) + "）")
-            }
-        }
-
-        val n = QueryInject.bumpHookCount()
-        if (n <= 20 || n % 20 == 0L) {
-            log("输入入口 #" + n + " " + clsName + "." + methodName + " args[" + idx + "]=" + text.take(60))
-        }
-
-        // 排队里有指令就替换掉，让小爱执行我们的目标而不是触发用的占位词
-        val pending = QueryInject.takePending()
-        if (pending != null) {
-            args[idx] = pending
-            QueryInject.note("已替换 $clsName.$methodName -> ${pending.take(40)}")
-            log("★ 输入层注入：" + clsName + "." + methodName + " [" + text.take(30) + "] -> 「" + pending.take(60) + "」")
-        }
+        installed.add("AudioRecord(录音数据替换)")
+        log("已挂载 AudioRecord hook 到 ${lp.packageName}")
     }
 
     // ------------------------------------------------------------------
@@ -467,7 +342,6 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     companion object {
         private const val HOST_PACKAGE = "com.dsh.phoneact"
-        private const val XIAOI_PACKAGE = "com.miui.voiceassist"
         private const val ACTION_XPOSED_EVENT = "com.dsh.phoneact.XPOSED_EVENT"
         private const val EVENT_FOREGROUND = "foreground"
         private const val EVENT_CONTENT = "content"

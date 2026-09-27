@@ -31,7 +31,7 @@ data class Settings(
     val debounceMs: Long = 350,
     val maxElements: Int = 120,
 
-    // ---- 小爱语音通道 ----
+    // ---- 语音片段合成（动态 hook 用）----
     /** PC 端 SAPI TTS 服务地址，例如 http://192.168.1.80:8518 。留空表示不用。 */
     val ttsServerUrl: String = "",
     val ttsRate: Int = 1,
