@@ -28,7 +28,76 @@ object XiaoAi {
         val detail: String,
         val answer: String = "",
         val elements: Int = 0,
+        /** 结果判定：success / failed / unknown */
+        val verdict: String = "unknown",
+        /** 判定命中的关键词 */
+        val verdictHit: String = "",
+        /** 结束时屏幕上的文字（用于人工/模型核对） */
+        val screen: String = "",
+        /** 本次调用期间产生的 hook 轨迹 */
+        val trace: String = "",
     )
+
+    private val SUCCESS_WORDS = listOf("已发送", "发送成功", "已完成", "成功", "已打开", "搞定", "好的")
+    private val FAIL_WORDS = listOf("失败", "无法", "不能", "抱歉", "不支持", "取消")
+
+    private fun textSet(m: ScreenModel?): Set<String> =
+        m?.elements?.map { it.text.trim() }?.filter { it.isNotEmpty() }?.toSet() ?: emptySet()
+
+    /** 两屏文本的相似度，用来判断"页面有没有跳转"。 */
+    private fun similarity(a: Set<String>, b: Set<String>): Double {
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        val inter = a.count { b.contains(it) }
+        return inter.toDouble() / maxOf(a.size, b.size)
+    }
+
+    /**
+     * 点小爱悬浮条上的**麦克风图标**，开启下一轮语音。
+     *
+     * 为什么需要：小爱的技能是多轮的，第一轮说完后它会等用户再点一次/再说一句。
+     * 如果页面没有跳转（说明它没往下走），就补点一次麦克风 ——
+     * 新一轮 startRecording 会让注入队列自动取下一段（例如"确认"）。
+     *
+     * 位置：麦克风在悬浮条偏右约 77% 处（实测 1280 宽屏下 x≈962，条中心 y≈2584）。
+     * 这里按框体比例算，避免写死坐标。
+     */
+    private fun tapMicIcon(model: ScreenModel?): Boolean {
+        val m = model ?: return false
+        val bar = m.elements
+            .filter { it.source == ElementSource.FRAME && it.kind == "input" && it.bounds.top > m.height * 0.65 }
+            .maxByOrNull { it.bounds.area }
+        val x: Int
+        val y: Int
+        if (bar != null) {
+            x = bar.bounds.left + (bar.bounds.width * 768 / 1000)
+            y = bar.bounds.centerY
+        } else {
+            x = m.width * 3 / 4
+            y = m.height * 93 / 100
+        }
+        val r = Actions.tap(x, y)
+        Lg.i("补点麦克风图标 ($x,$y) -> ${r.ok}")
+        return r.ok
+    }
+
+    /** 画面稳定后重新识别一次，给出"是否完成"的判定依据。 */
+    private fun analyzeFinal(model: ScreenModel?): Triple<String, String, String> {
+        val m = model ?: FrameHub.recognizeNow(true) ?: return Triple("unknown", "", "")
+        val texts = m.elements.filter { it.text.isNotBlank() }
+            .sortedWith(compareBy({ it.bounds.top }, { it.bounds.left }))
+            .map { it.text.trim() }
+            .distinct()
+        val screen = texts.joinToString(" | ").take(1200)
+        val hitFail = FAIL_WORDS.firstOrNull { w -> texts.any { it.contains(w) } }
+        val hitOk = SUCCESS_WORDS.firstOrNull { w -> texts.any { it.contains(w) } }
+        // 失败词优先：小爱的否定句里常常同时含"成功"字样
+        val verdict = when {
+            hitFail != null -> "failed"
+            hitOk != null -> "success"
+            else -> "unknown"
+        }
+        return Triple(verdict, hitFail ?: hitOk ?: "", screen)
+    }
 
     /** 当前是否是小爱/小爱悬浮窗持有焦点。 */
     fun hasFocus(): Boolean {
@@ -214,7 +283,9 @@ object XiaoAi {
         waitMs: Long,
         wavBase64: String? = null,
         followUps: List<String> = emptyList(),
+        usePreparedQueue: Boolean = false,
     ): Outcome {
+        val callStart = System.currentTimeMillis()
         if (instruction.isBlank()) return Outcome(false, "input", "指令为空")
         if (!installed()) return Outcome(false, "check", "未安装超级小爱")
         if (!RootShell.available) RootShell.probe()
@@ -222,16 +293,19 @@ object XiaoAi {
 
         // 优先用外部提供的音频（设备上没有可用 TTS 引擎时的通道），否则走本机 TTS
         // 组装语音队列：第 1 轮说指令，后续轮次说"确认"之类（小爱的技能常会追问）
-        XiaoAiVoice.resetQueue()
-        val first = if (!wavBase64.isNullOrBlank()) {
-            XiaoAiVoice.appendFromWavBase64(wavBase64)
-        } else {
-            XiaoAiVoice.appendFromText(instruction)
-        }
-        if (!first) return Outcome(false, "tts", "语音准备失败: ${XiaoAiVoice.error}")
-        for (f in followUps) {
-            if (!XiaoAiVoice.appendFromText(f)) {
-                Lg.w("后续轮次语音合成失败「$f」: ${XiaoAiVoice.error}")
+        // usePreparedQueue=true 时直接用 xiaoi_tts_set 备好的队列，不再重新合成
+        if (!usePreparedQueue || XiaoAiVoice.clipCount == 0) {
+            XiaoAiVoice.resetQueue()
+            val first = if (!wavBase64.isNullOrBlank()) {
+                XiaoAiVoice.appendFromWavBase64(wavBase64)
+            } else {
+                XiaoAiVoice.appendFromText(instruction)
+            }
+            if (!first) return Outcome(false, "tts", "语音准备失败: ${XiaoAiVoice.error}")
+            for (f in followUps) {
+                if (!XiaoAiVoice.appendFromText(f)) {
+                    Lg.w("后续轮次语音合成失败「$f」: ${XiaoAiVoice.error}")
+                }
             }
         }
 
@@ -254,16 +328,35 @@ object XiaoAi {
         try {
             if (!launch()) return Outcome(false, "launch", "唤起超级小爱失败")
 
-            // 语音是实时喂的：先等播完，再等画面稳定（执行完成），不再固定 sleep
+            // 语音是实时喂的：先等播完，再等画面稳定（疑似完成），不再固定 sleep
             val playMs = XiaoAiVoice.durationMs.toLong() + 600
-            val after = waitStable(playMs, waitMs.coerceIn(4000, 60000))
-            val answer = collectAnswer(after, after?.height ?: 2400, before)
+            var after = waitStable(playMs, waitMs.coerceIn(4000, 60000))
+
+            // 页面没跳转 => 小爱没往下走，补点麦克风开下一轮，
+            // 注入队列会自动把下一段（如"确认"）喂进去。最多补 3 次。
+            val baseTexts = textSet(FrameHub.model.value)
+            var retries = 0
+            while (retries < 3 && similarity(baseTexts, textSet(after)) > 0.80) {
+                retries++
+                Lg.i("未检测到页面跳转，第 $retries 次补点麦克风图标")
+                if (!tapMicIcon(after)) break
+                after = waitStable(1500, (waitMs / 2).coerceIn(3000, 30000))
+                if (similarity(baseTexts, textSet(after)) <= 0.80) break
+            }
+            if (retries > 0) Lg.i("补点麦克风共 $retries 次")
+
+            // 疑似完成：画面稳定后再完整识别一次，给出判定与屏幕文字
+            val (verdict, hit, screen) = analyzeFinal(after)
             return Outcome(
                 ok = true,
                 stage = "voice",
                 detail = "语音队列 ${XiaoAiVoice.clipCount} 轮，首轮 ${XiaoAiVoice.durationMs}ms + origin 伪装 VoiceButton",
-                answer = answer,
+                answer = collectAnswer(after, after?.height ?: 2400, before),
                 elements = after?.elements?.size ?: 0,
+                verdict = verdict,
+                verdictHit = hit,
+                screen = screen,
+                trace = Trace.format(Trace.since(callStart)),
             )
         } finally {
             setOriginOverride("")
@@ -403,8 +496,10 @@ object XiaoAi {
             if (!t.ok) return Outcome(false, "trigger", t.detail)
             val after = waitStable(1200, waitMs.coerceIn(4000, 60000))
             val answer = collectAnswer(after, after?.height ?: 2400, before)
+            val (verdict, hit, screen) = analyzeFinal(after)
             Outcome(
                 ok = true, stage = "origin_spoof",
+                verdict = verdict, verdictHit = hit, screen = screen,
                 detail = "指令已发送，QueryOrigin 伪造成 [" + origin + "]（需 Xposed 生效）",
                 answer = answer, elements = after?.elements?.size ?: 0,
             )
@@ -446,7 +541,11 @@ object XiaoAi {
         put("ok", o.ok)
         put("stage", o.stage)
         put("detail", o.detail)
+        put("verdict", o.verdict)
+        if (o.verdictHit.isNotEmpty()) put("verdictHit", o.verdictHit)
         if (o.answer.isNotEmpty()) put("answer", o.answer)
+        if (o.screen.isNotEmpty()) put("screen", o.screen)
         put("elements", o.elements)
+        if (o.trace.isNotEmpty()) put("trace", o.trace)
     }
 }

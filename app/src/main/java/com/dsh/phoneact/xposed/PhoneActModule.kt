@@ -395,6 +395,8 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
         val app: Application = currentApplication() ?: return
         val i = Intent(ACTION_XPOSED_EVENT)
         i.setPackage(HOST_PACKAGE)
+        // 显式组件：MIUI 会丢弃隐式的"非保护广播"（见 Bridge 中的说明）
+        i.setClassName(HOST_PACKAGE, "com.dsh.phoneact.xposed.XposedEventReceiver")
         // 统一加 pa_ 前缀：MIUI 的 contentcatcher 等系统组件会覆写 "package"/"type" 这类通用键
         i.putExtra(EXTRA_TYPE, type)
         i.putExtra(EXTRA_SOURCE, sourcePackage)
@@ -437,9 +439,7 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
         ))
     }
 
-    private fun log(msg: String) {
-        runCatching { XposedBridge.log("[PhoneAct] $msg") }
-    }
+    private fun log(msg: String) = Bridge.log(msg, "module")
 
     companion object {
         private const val HOST_PACKAGE = "com.dsh.phoneact"

@@ -81,6 +81,26 @@ object McpTools {
                     "也可指定要伪造的 QueryOrigin 值，如 VoiceButton", "auto")),
             listOf("instruction"))
 
+        tool("xiaoi_tts_set",
+            "【语音内容工具】设定要注入小爱麦克风的语音队列 —— 也就是注入(篡改)进去的内容。" +
+                "小爱的技能多为多轮追问，按顺序逐轮播报：第 1 轮说指令，页面跳转后的第 2 轮说「确认」。" +
+                "设定后用 xiaoi_voice_task {use_prepared:true} 触发。",
+            JSONObject()
+                .put("texts", JSONObject().put("type", "array")
+                    .put("description", "按轮次排列的文本，例如 [\"给微信好友sunshine发消息说你好\", \"确认\"]")
+                    .put("items", JSONObject().put("type", "string")))
+                .put("rate", p("integer", "语速 -10..10", 1)),
+            listOf("texts"))
+
+        tool("xiaoi_tts_queue",
+            "查看当前语音队列：每段时长、是否已就绪。",
+            JSONObject(), emptyList())
+
+        tool("xiaoi_trace",
+            "读取被注入进程实时回传的 hook 轨迹（AudioRecord 注入 / 输入层篡改 / origin 覆盖 / 语音载入）。" +
+                "执行类工具默认也会在返回里带上这段轨迹。",
+            JSONObject().put("lines", p("integer", "返回行数", 60)), emptyList())
+
         tool("tts_status",
             "测试 PC 端 TTS 服务是否可用（GET {base}/health），并返回当前配置。" +
                 "superxiaoi 需要语音指令，设备自带 TTS 引擎常不可用，用 PC 的 Windows SAPI 最省事。",
@@ -99,6 +119,7 @@ object McpTools {
                 .put("instruction", p("string", "要说的那句话，例如：给微信联系人sunshine发消息说你好"))
                 .put("wait_ms", p("integer", "注入后等待小爱执行的毫秒数", 15000))
                 .put("wav_base64", p("string", "可选：外部合成好的 16bit PCM WAV（base64）。一般不用，留空走 TTS"))
+                .put("use_prepared", p("boolean", "true=使用 xiaoi_tts_set 备好的队列，不再合成", false))
                 .put("follow_ups", JSONObject()
                     .put("type", "array")
                     .put("description", "后续轮次要说的内容。小爱的技能会多轮追问，默认追加「确认」")
@@ -284,6 +305,10 @@ object McpTools {
         when (name) {
             "device_status" -> deviceStatus()
             "xiaoi_status" -> ToolResult.json(XiaoAi.statusJson())
+            "xiaoi_tts_set" -> xiaoiTtsSet(args)
+            "xiaoi_tts_queue" -> xiaoiTtsQueue()
+            "xiaoi_trace" -> ToolResult.text(com.dsh.phoneact.core.Trace.format(
+                com.dsh.phoneact.core.Trace.tail(args.optInt("lines", 60))))
             "tts_status" -> ttsStatus()
             "tts_self_test" -> ttsSelfTest(args)
             "xiaoi_act" -> xiaoiAct(args)
@@ -492,6 +517,36 @@ object McpTools {
         return if (o.ok) ToolResult.json(XiaoAi.outcomeJson(o)) else ToolResult.error("${o.stage}: ${o.detail}")
     }
 
+    private fun xiaoiTtsSet(args: JSONObject): ToolResult {
+        val arr = args.optJSONArray("texts") ?: return ToolResult.error("缺少 texts 数组")
+        if (arr.length() == 0) return ToolResult.error("texts 为空")
+        if (args.has("rate")) Prefs.update { it.copy(ttsRate = args.getInt("rate").coerceIn(-10, 10)) }
+        com.dsh.phoneact.core.XiaoAiVoice.resetQueue()
+        val durations = JSONArray()
+        val errors = JSONArray()
+        for (i in 0 until arr.length()) {
+            val t = arr.optString(i, "").trim()
+            if (t.isEmpty()) { durations.put(0); continue }
+            val ok = com.dsh.phoneact.core.XiaoAiVoice.appendFromText(t)
+            durations.put(if (ok) com.dsh.phoneact.core.XiaoAiVoice.clipCount.let { _ ->
+                com.dsh.phoneact.core.XiaoAiVoice.metaJson().optJSONArray("durations")?.optInt(i, 0) ?: 0
+            } else 0)
+            if (!ok) errors.put(JSONObject().put("index", i).put("error", com.dsh.phoneact.core.XiaoAiVoice.error))
+        }
+        return ToolResult.json(JSONObject()
+            .put("ok", errors.length() == 0)
+            .put("clipCount", com.dsh.phoneact.core.XiaoAiVoice.clipCount)
+            .put("durations", durations)
+            .put("seq", com.dsh.phoneact.core.XiaoAiVoice.seq)
+            .put("errors", errors))
+    }
+
+    private fun xiaoiTtsQueue(): ToolResult {
+        val meta = com.dsh.phoneact.core.XiaoAiVoice.metaJson()
+        meta.put("ready", com.dsh.phoneact.core.XiaoAiVoice.clipCount > 0)
+        return ToolResult.json(meta)
+    }
+
     private fun ttsStatus(): ToolResult {
         val url = Prefs.current.ttsServerUrl
         val o = JSONObject().put("configuredUrl", url).put("rate", Prefs.current.ttsRate)
@@ -544,7 +599,8 @@ object McpTools {
         val arr = args.optJSONArray("follow_ups")
         val followUps = if (arr != null) (0 until arr.length()).mapNotNull { arr.optString(it).ifBlank { null } }
         else listOf("确认")
-        val o = XiaoAi.askByVoice(instruction, waitMs, wav, followUps)
+        val usePrepared = args.optBoolean("use_prepared", false)
+        val o = XiaoAi.askByVoice(instruction, waitMs, wav, followUps, usePrepared)
         Lg.i("xiaoi_voice_task 「$instruction」 -> ${o.stage} ${if (o.ok) "成功" else "失败"}")
         return if (o.ok) ToolResult.json(XiaoAi.outcomeJson(o)) else ToolResult.error("${o.stage}: ${o.detail}")
     }

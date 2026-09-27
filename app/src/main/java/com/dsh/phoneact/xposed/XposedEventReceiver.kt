@@ -31,6 +31,12 @@ class XposedEventReceiver : BroadcastReceiver() {
                     bridge = i.getIntExtra("pa_bridge", 0),
                 )
             }
+            "log" -> {
+                com.dsh.phoneact.core.Trace.add(
+                    i.getStringExtra("pa_tag").orEmpty().ifBlank { "hook" },
+                    i.getStringExtra("pa_msg").orEmpty(),
+                )
+            }
             else -> Unit
         }
     }

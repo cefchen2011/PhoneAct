@@ -251,7 +251,5 @@ object VoiceInject {
     private fun le16(b: ByteArray, o: Int): Int =
         (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8)
 
-    private fun hookLog(m: String) {
-        runCatching { de.robv.android.xposed.XposedBridge.log("[PhoneAct] $m") }
-    }
+    private fun hookLog(m: String) = Bridge.log(m, "inject")
 }

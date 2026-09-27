@@ -101,7 +101,5 @@ object QueryInject {
         lastInfo = msg
     }
 
-    fun log(msg: String) {
-        runCatching { de.robv.android.xposed.XposedBridge.log("[PhoneAct] $msg") }
-    }
+    fun log(msg: String) = Bridge.log(msg, "query")
 }
