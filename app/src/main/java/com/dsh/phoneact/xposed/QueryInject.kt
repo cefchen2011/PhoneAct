@@ -23,6 +23,9 @@ object QueryInject {
 
     private const val AUTHORITY = "com.dsh.phoneact.xiaoi"
 
+    /** 当前进程的包名，由 PhoneActModule 写入。 */
+    @Volatile var processPackage: String = ""
+
     @Volatile private var lastSeq = 0L
 
     @Volatile var lastInfo: String = "尚未触发"

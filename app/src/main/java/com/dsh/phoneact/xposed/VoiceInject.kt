@@ -24,6 +24,9 @@ object VoiceInject {
     private const val KEY_SEQ = "phoneact_inject_seq"
 
     /** 当前任务已经喂到第几轮（多轮对话会多次 startRecording）。 */
+    /** 当前进程的包名，由 PhoneActModule 在挂载时写入。 */
+    @Volatile var processPackage: String = ""
+
     @Volatile private var turnIndex = 0
 
     @Volatile private var pcm: ByteArray? = null
@@ -79,6 +82,12 @@ object VoiceInject {
         // 动态 hook：没武装就完全不碰麦克风数据
         if (!meta.optBoolean("armed", false)) {
             lastInfo = "注入未武装，跳过"
+            return
+        }
+        // 目标应用过滤：MCP 可以指定只对某个包生效（留空 = 所有被注入的应用）
+        val target = meta.optString("target", "")
+        if (target.isNotBlank() && target != processPackage) {
+            lastInfo = "目标不匹配（本进程 $processPackage，目标 $target）"
             return
         }
         val seq = meta.optLong("seq", 0L)

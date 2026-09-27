@@ -118,10 +118,20 @@ object McpTools {
                 .put("texts", JSONObject().put("type", "array")
                     .put("description", "按轮次排列的文本，例如 [\"给SUNSHINE发微信说你好\", \"确认\"]")
                     .put("items", JSONObject().put("type", "string")))
-                .put("rate", p("integer", "语速 -10..10", 1)),
+                .put("rate", p("integer", "语速 -10..10", 1))
+                .put("target_package", p("string", "只对该包生效（留空 = 所有被注入的应用）。" +
+                    "需先把该应用加入 LSPosed 作用域（一次性），此后 arm/disarm 即时生效、无需重启应用", "")),
             listOf("texts"))
 
         tool("xiaoi_inject_disarm", "卸下语音注入（动态 hook 关闭，队列清空）。", JSONObject(), emptyList())
+
+        tool("xiaoi_wake",
+            "唤起超级小爱（与真人一致的路径：双击底部手势条，wake origin 带 " +
+                "double_click_fullscreen_gesture_line）。**必须用这个** —— " +
+                "分两次调 ui_tap 会因往返延迟错过双击窗口；本工具在进程内以 80ms 间隔连点。" +
+                "若已被唤起则直接返回 already=true。",
+            JSONObject().put("force", p("boolean", "true(默认)=不管是否已唤起都重新双击开一轮新录音；" +
+                "false=已可见就直接复用", true)), emptyList())
 
         tool("xiaoi_mic_tap",
             "点小爱悬浮条上的麦克风图标，开启下一轮语音。**是否补点由你决定** —— " +
@@ -339,7 +349,13 @@ object McpTools {
             "tts_status" -> ttsStatus()
             "tts_self_test" -> ttsSelfTest(args)
             "xiaoi_inject_arm" -> xiaoiInjectArm(args)
-            "xiaoi_inject_disarm" -> { com.dsh.phoneact.core.XiaoAiVoice.disarm(); com.dsh.phoneact.core.XiaoAiVoice.resetQueue(); ToolResult.json(JSONObject().put("ok", true).put("armed", false)) }
+            "xiaoi_inject_disarm" -> {
+                com.dsh.phoneact.core.XiaoAiVoice.disarm()
+                com.dsh.phoneact.core.XiaoAiVoice.resetQueue()
+                com.dsh.phoneact.core.XiaoAiVoice.setTarget("")
+                ToolResult.json(JSONObject().put("ok", true).put("armed", false))
+            }
+            "xiaoi_wake" -> xiaoiWake(args)
             "xiaoi_mic_tap" -> xiaoiMicTap()
             "xiaoi_observe" -> xiaoiObserve(args)
             "xiaoi_act" -> xiaoiAct(args)
@@ -552,6 +568,7 @@ object McpTools {
         val arr = args.optJSONArray("texts") ?: return ToolResult.error("缺少 texts 数组")
         if (arr.length() == 0) return ToolResult.error("texts 为空")
         if (args.has("rate")) Prefs.update { it.copy(ttsRate = args.getInt("rate").coerceIn(-10, 10)) }
+        com.dsh.phoneact.core.XiaoAiVoice.setTarget(args.optString("target_package", ""))
         com.dsh.phoneact.core.XiaoAiVoice.resetQueue()
         val durations = JSONArray()
         val errors = JSONArray()
@@ -574,8 +591,24 @@ object McpTools {
             .put("armed", true)
             .put("clipCount", com.dsh.phoneact.core.XiaoAiVoice.clipCount)
             .put("durations", durations)
+            .put("target", com.dsh.phoneact.core.XiaoAiVoice.target)
             .put("hint", "现在可以用任意方式唤起小爱（例如双击底部手势条：ui_tap 两次，" +
                 "x=屏宽/2, y=屏高*0.99），每次录音会自动播下一段"))
+    }
+
+    private fun xiaoiWake(args: JSONObject): ToolResult {
+        val before = com.dsh.phoneact.core.FrameHub.foregroundPackage
+        val already = before == "com.miui.voiceassist"
+        val force = args.optBoolean("force", true)
+        val ok = if (force) com.dsh.phoneact.core.XiaoAi.wakeForce()
+        else com.dsh.phoneact.core.XiaoAi.launch()
+        return ToolResult.json(JSONObject()
+            .put("ok", ok)
+            .put("forced", force)
+            .put("already", already && ok)
+            .put("foregroundBefore", before)
+            .put("foregroundAfter", com.dsh.phoneact.core.FrameHub.foregroundPackage)
+            .put("armed", com.dsh.phoneact.core.XiaoAiVoice.armed))
     }
 
     private fun xiaoiMicTap(): ToolResult {

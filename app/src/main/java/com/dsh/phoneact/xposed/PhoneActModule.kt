@@ -46,11 +46,12 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
                 hookForegroundTracking(lp)
                 hookContentUpdates(lp)
                 if (lp.packageName == "com.android.systemui") hookMediaProjectionConsent(lp)
-                // 超级小爱只认语音指令；在框架层替换它的麦克风数据，让它"听到"我们合成的话
-                if (lp.packageName == XIAOI_PACKAGE) {
-                    hookAudioInject(lp)
-                    hookQueryInput(lp)
-                }
+
+                // 动态 hook：**所有**被注入的进程都挂上音频注入与查询改写，
+                // 具体对哪个应用生效由 MCP 运行时指定（arm/disarm 即时生效，不需要重启应用）。
+                // 需要 LSPosed 作用域包含目标应用 —— 这是一次性配置，之后都是运行时控制。
+                hookAudioInject(lp)
+                hookQueryInput(lp)
             }
         } catch (t: Throwable) {
             lastError = "${lp.packageName}: ${t.message}"
@@ -112,6 +113,9 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
     // ------------------------------------------------------------------
 
     private fun hookAudioInject(lp: XC_LoadPackage.LoadPackageParam) {
+        // 让注入侧知道"我是谁"，供 MCP 的目标包过滤使用
+        VoiceInject.processPackage = lp.packageName
+        QueryInject.processPackage = lp.packageName
         val cls = XposedHelpers.findClassIfExists("android.media.AudioRecord", lp.classLoader) ?: return
         XposedHelpers.findAndHookMethod(cls, "startRecording", object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {

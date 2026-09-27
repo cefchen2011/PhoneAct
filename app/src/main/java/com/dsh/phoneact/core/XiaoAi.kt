@@ -188,7 +188,7 @@ object XiaoAi {
         FrameHub.foregroundPackage == PKG || hasFocusCached()
 
     /** 双击底部手势条唤起小爱（与真人操作一致的 wake origin）。 */
-    private fun doubleTapGestureLine(): Boolean {
+    fun doubleTapGestureLine(): Boolean {
         val m = FrameHub.model.value
         val x = (m?.width ?: 1080) / 2
         val y = ((m?.height ?: 2400) - (m?.height ?: 2400) / 120).coerceAtLeast(1)
@@ -242,6 +242,18 @@ object XiaoAi {
      * 而 `am start -a android.intent.action.ASSIST` 只有 `...&&null`，小爱不会走到
      * "交棒微信"那一步（WeChatLanguageControl: Starting voice control 不会出现）。
      */
+    /**
+     * 强制唤起：不管小爱当前是否已经可见，都重新双击一次手势条开一轮新录音。
+     * 悬浮窗常驻时 [launch] 会直接返回 true 而不录音，agent 需要的是"再来一轮"。
+     */
+    fun wakeForce(): Boolean {
+        if (!RootShell.available) RootShell.probe()
+        if (!RootShell.available) return false
+        focusCacheAt = 0L
+        if (doubleTapGestureLine() && pollXiaoAi(4000)) return true
+        return launch()
+    }
+
     fun launch(): Boolean {
         if (!RootShell.available) RootShell.probe()
         if (!RootShell.available) return false

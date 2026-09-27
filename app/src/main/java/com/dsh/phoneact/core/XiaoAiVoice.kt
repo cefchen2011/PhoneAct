@@ -37,7 +37,13 @@ object XiaoAiVoice {
      */
     @Volatile private var armedFlag: Boolean = false
 
+    /** 只对哪个包生效；留空 = 所有被注入的应用（要在 LSPosed 作用域里）。 */
+    @Volatile private var targetPackage: String = ""
+
     val armed: Boolean get() = armedFlag
+    val target: String get() = targetPackage
+
+    fun setTarget(pkg: String) { targetPackage = pkg.trim() }
 
     fun arm() { armedFlag = true; Lg.i("语音注入已武装（动态 hook 生效）") }
 
@@ -69,6 +75,7 @@ object XiaoAiVoice {
         put("seq", seqValue)
         put("count", clips.size)
         put("armed", armedFlag)
+        put("target", targetPackage)
         put("sampleRate", TTS_RATE)
         put("durations", org.json.JSONArray().apply { clips.forEach { put(it.durationMs) } })
         if (lastError.isNotEmpty()) put("error", lastError)

@@ -70,8 +70,9 @@ description: 通过 MCP 操作一台（已 root 的）安卓手机 —— 分块
 
 | 原语 | 作用 |
 | --- | --- |
-| `xiaoi_inject_arm {texts}` | 合成语音队列并武装动态 hook |
-| `xiaoi_inject_disarm` | 卸下并清空队列 |
+| `xiaoi_inject_arm {texts, target_package?}` | 合成语音队列并武装动态 hook（`target_package` 留空 = 所有被注入的应用） |
+| `xiaoi_inject_disarm` | 卸下并清空队列，并清掉 target 过滤 |
+| `xiaoi_wake` | 唤起小爱（进程内双击手势条，与真人 wake origin 一致）。**必须用它**，别分两次调 `ui_tap` —— 往返延迟会错过双击窗口 |
 | `xiaoi_mic_tap` | 点小爱悬浮条的麦克风图标（**补点与否由你决定**） |
 | `xiaoi_observe {wait_ms}` | 等一会儿，返回 `verdict` / `screen` / `trace`，**不做任何重试** |
 | `xiaoi_trace {lines}` | 拉 hook 轨迹 |
@@ -80,9 +81,7 @@ description: 通过 MCP 操作一台（已 root 的）安卓手机 —— 分块
 
 ```
 1) xiaoi_inject_arm { texts: ["给SUNSHINE发微信说你好", "确认"] }
-2) 唤起小爱：双击底部手势条 —— 连调两次 ui_tap
-      x = 屏宽/2 , y = 屏高 × 0.99
-   （必须走这条路：只有它产生 wake origin 里的 double_click_fullscreen_gesture_line）
+2) xiaoi_wake                              # 双击底部手势条（进程内 80ms 间隔，一次搞定）
 3) xiaoi_observe { wait_ms: 8000 }        # 给小爱理解 + 跳转的时间
 4) 看返回的 screen / verdict：
       · 有进展（进了微信、出现确认卡）      -> 继续 observe
@@ -118,6 +117,22 @@ description: 通过 MCP 操作一台（已 root 的）安卓手机 —— 分块
   这一步没出现，说明卡在"小爱没交棒给微信"，而不是语音内容不对。
 - 判成功的特征：`A2ACardActivity` 出现后正常收尾。
 - 详见 `docs/XIAOI-BASELINE.md`。
+
+### 3.3.1 动态 hook 的覆盖面（重要）
+
+hook 装在**框架层**（android.media.AudioRecord + 小爱的 Query 入口），
+所以只要某个 App 在 **LSPosed 作用域**里，它的录音/查询就被同一套动态开关控制：
+
+```
+xiaoi_inject_arm { texts:[...], target_package:'com.tencent.mm' }   # 只喂微信
+xiaoi_inject_arm { texts:[...] }                                     # 作用域内所有 App 都喂
+```
+
+- 作用域变更（新增 App）**只需做一次**，且要重启该 App 进程（模块在 fork 时加载）；
+  之后 arm / disarm / 换文本都是**即时生效、不用重载**。
+- 微信这类自带语音控制 SDK 的应用也因此能被接管：微信自己的「按住说话」同样走
+  AudioRecord，会被队列里的语音替换。
+- 微信侧和小爱侧**只注入一次就够**：见 3.3，小爱把音频缓存后回放给微信。
 
 ### 3.4 要点与坑
 
