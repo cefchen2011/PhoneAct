@@ -21,8 +21,10 @@ class XiaoAiAudioProvider : ContentProvider() {
 
     override fun onCreate(): Boolean = true
 
+    /** content://<auth>/pcm?i=<轮次> —— 多轮对话每轮取一段。 */
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
-        val f = XiaoAiVoice.pcmFile()
+        val i = uri.getQueryParameter("i")?.toIntOrNull() ?: 0
+        val f = XiaoAiVoice.clipFile(i)
         if (!f.exists() || f.length() == 0L) return null
         return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
     }

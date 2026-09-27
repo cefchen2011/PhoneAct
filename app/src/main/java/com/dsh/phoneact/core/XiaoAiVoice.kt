@@ -5,7 +5,6 @@ import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import com.dsh.phoneact.PhoneActApp
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
@@ -14,155 +13,173 @@ import java.util.concurrent.TimeUnit
 /**
  * 把文字合成为语音 PCM，供 Xposed 侧注入到超级小爱的录音流里。
  *
- * 背景：超级小爱对"发消息/打电话"这类能力只认**语音**指令，文字会被拒
- * （实测回答："微信发消息、打电话、打视频电话功能当前仅支持语音对话方式"）。
- * 所以要让小爱真正 act，必须让它"听到"话 —— 做法是在 AudioRecord 读取处把
- * 真实的麦克风数据替换成这里合成的 PCM。
+ * 小爱对"发消息/打电话"这类能力只认语音，且技能多为**多轮追问**
+ * （例如先问发给谁说啥，再问"确认发送吗"）。因此这里维护的是一个**语音队列**：
+ * 每一轮新的录音会话依次取下一段，而不是反复播同一句。
  */
 object XiaoAiVoice {
 
     private const val TTS_RATE = 16000
 
     @Volatile private var lastError: String = ""
-
-    data class Clip(val pcm: ByteArray, val sampleRate: Int, val seq: Long)
-
-    @Volatile private var clip: Clip? = null
-
     val error: String get() = lastError
-    val hasClip: Boolean get() = clip != null
-    val seq: Long get() = clip?.seq ?: 0L
-    /** 语音时长（毫秒），小爱的录音窗口只有约 5 秒，超了就白说。 */
-    val durationMs: Int get() = ((clip?.pcm?.size ?: 0) / 2) * 1000 / TTS_RATE
 
-    fun pcmFile(): File = File(PhoneActApp.instance.filesDir, "xiaoi_voice.pcm")
+    data class Clip(val pcm: ByteArray, val sampleRate: Int = TTS_RATE) {
+        val durationMs: Int get() = (pcm.size / 2) * 1000 / sampleRate
+    }
+
+    /** 当前会话的语音队列；seq 标识"第几次任务"，hook 靠它判断是否要重置轮次。 */
+    @Volatile private var clips: List<Clip> = emptyList()
+    @Volatile private var seqValue: Long = 0L
+
+    /** 当前任务编号；hook 靠它区分"新任务"从而重置轮次。 */
+    val seq: Long get() = seqValue
+
+    val clipCount: Int get() = clips.size
+    val hasClip: Boolean get() = clips.isNotEmpty()
+    val durationMs: Int get() = clips.firstOrNull()?.durationMs ?: 0
+
+    fun clipFile(i: Int): File = File(PhoneActApp.instance.filesDir, "xiaoi_voice_$i.pcm")
+
+    fun resetQueue() {
+        clips.forEachIndexed { i, _ -> runCatching { clipFile(i).delete() } }
+        clips = emptyList()
+        seqValue = 0L
+    }
 
     fun metaJson(): org.json.JSONObject = org.json.JSONObject().apply {
-        put("seq", seq)
-        put("sampleRate", clip?.sampleRate ?: 0)
-        put("bytes", clip?.pcm?.size ?: 0)
-        put("hasClip", hasClip)
+        put("seq", seqValue)
+        put("count", clips.size)
+        put("sampleRate", TTS_RATE)
+        put("durations", org.json.JSONArray().apply { clips.forEach { put(it.durationMs) } })
         if (lastError.isNotEmpty()) put("error", lastError)
     }
 
-    /** 合成文本 -> 16k/单声道/16bit PCM。成功返回 true。 */
-    fun synthesize(text: String, timeoutMs: Long = 15000): Boolean {
+    /** 追加一段语音（本机 TTS 失败则回退 PC 端服务）。 */
+    fun appendFromText(text: String): Boolean {
+        if (text.isBlank()) return true
+        val pcm = synthLocal(text) ?: synthFromServer(text) ?: return false
+        appendPcm(pcm)
+        return true
+    }
+
+    /**
+     * 追加内置触发词（assets/xiaoi_trigger.b64，约 1 秒的"你好"）。
+     * 用途：走语音路径但不想让 ASR 去听一整句时，只喂一个短触发词出结果，
+     * 真正的指令由输入层 hook 替换。
+     */
+    fun appendTriggerBlip(): Boolean = try {
+        val b64 = PhoneActApp.instance.assets.open("xiaoi_trigger.b64")
+            .use { String(it.readBytes(), Charsets.UTF_8) }.trim()
+        if (b64.isEmpty()) { lastError = "触发词资源为空"; false } else appendFromWavBase64(b64)
+    } catch (t: Throwable) {
+        lastError = "载入触发词失败: ${t.message}"
+        false
+    }
+
+    /** 直接用外部合成好的 WAV（base64）追加一段。 */
+    fun appendFromWavBase64(b64: String): Boolean = try {
+        val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+        val (pcm, rate) = parseWav(bytes)
+        if (pcm.isEmpty()) { lastError = "WAV 解析失败（需要 16bit PCM WAV）"; false }
+        else { appendPcm(if (rate == TTS_RATE) pcm else resample(pcm, rate, TTS_RATE)); true }
+    } catch (t: Throwable) {
+        lastError = "载入外部语音失败: ${t.message}"
+        false
+    }
+
+    private fun appendPcm(pcm: ByteArray) {
+        val list = clips.toMutableList()
+        val idx = list.size
+        clipFile(idx).writeBytes(pcm)
+        list.add(Clip(pcm))
+        clips = list
+        if (seqValue == 0L) seqValue = System.currentTimeMillis()
+        Lg.i("语音队列 +1: 第$idx 段 ${pcm.size}B ${(pcm.size / 2) * 1000 / TTS_RATE}ms，共${clips.size}段")
+    }
+
+    // ------------------------------------------------------------------
+    // 本机 TTS
+    // ------------------------------------------------------------------
+
+    private fun synthLocal(text: String): ByteArray? {
         lastError = ""
         val ctx: Context = PhoneActApp.instance
         val wav = File(ctx.cacheDir, "xiaoi_tts.wav")
         if (wav.exists()) wav.delete()
-
-        val latch = CountDownLatch(1)
         var tts: TextToSpeech? = null
-        var ok = false
-        try {
-            tts = TextToSpeech(ctx) { status ->
-                if (status != TextToSpeech.SUCCESS) {
-                    lastError = "TTS 初始化失败 status=$status"
-                    latch.countDown()
-                }
-            }
-            // 等初始化
+        return try {
+            val init = CountDownLatch(1)
+            tts = TextToSpeech(ctx) { st -> if (st != TextToSpeech.SUCCESS) init.countDown() }
             var waited = 0
-            while (waited < 6000 && latch.count != 0L) {
-                Thread.sleep(100); waited += 100
-            }
-            if (latch.count == 0L) return false
-
-            val engine = tts ?: return false
+            while (waited < 6000 && init.count != 0L) { Thread.sleep(100); waited += 100 }
+            if (init.count == 0L) { lastError = "TTS 初始化失败"; return null }
+            val engine = tts
             runCatching { engine.setLanguage(Locale.CHINA) }
             runCatching { engine.setSpeechRate(1.0f) }
-
             val done = CountDownLatch(1)
             engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) = Unit
-                override fun onDone(utteranceId: String?) { done.countDown() }
-                @Deprecated("deprecated in API 21")
-                override fun onError(utteranceId: String?) { done.countDown() }
-                override fun onError(utteranceId: String?, errorCode: Int) {
-                    lastError = "TTS 合成失败 code=$errorCode"
-                    done.countDown()
-                }
+                override fun onStart(id: String?) = Unit
+                override fun onDone(id: String?) { done.countDown() }
+                @Deprecated("deprecated")
+                override fun onError(id: String?) { done.countDown() }
+                override fun onError(id: String?, errorCode: Int) { done.countDown() }
             })
-
-            val params = Bundle()
-            val rc = engine.synthesizeToFile(text, params, wav, "phoneact")
-            if (rc != TextToSpeech.SUCCESS) {
-                lastError = "synthesizeToFile 返回 $rc"
-                return false
+            if (engine.synthesizeToFile(text, Bundle(), wav, "phoneact") != TextToSpeech.SUCCESS) {
+                lastError = "synthesizeToFile 失败"; return null
             }
-            done.await(timeoutMs, TimeUnit.MILLISECONDS)
-            if (!wav.exists() || wav.length() < 100) {
-                lastError = lastError.ifBlank { "TTS 未生成音频文件" }
-                return false
-            }
-
+            done.await(12000, TimeUnit.MILLISECONDS)
+            if (!wav.exists() || wav.length() < 100) { lastError = "TTS 未生成音频文件"; return null }
             val (pcm, rate) = parseWav(wav.readBytes())
-            if (pcm.isEmpty()) {
-                lastError = "WAV 解析失败"
-                return false
-            }
-            val resampled = if (rate == TTS_RATE) pcm else resample(pcm, rate, TTS_RATE)
-            pcmFile().writeBytes(resampled)
-            clip = Clip(resampled, TTS_RATE, System.currentTimeMillis())
-            ok = true
-            Lg.i("小爱语音已合成: ${text.length} 字 -> ${resampled.size} 字节 PCM @${TTS_RATE}Hz (源 ${rate}Hz)")
+            if (pcm.isEmpty()) { lastError = "WAV 解析失败"; return null }
+            if (rate == TTS_RATE) pcm else resample(pcm, rate, TTS_RATE)
         } catch (t: Throwable) {
-            lastError = "合成异常: ${t.message}"
-            Lg.e("小爱语音合成失败", t)
+            lastError = "本机 TTS 异常: ${t.message}"
+            null
         } finally {
             runCatching { tts?.shutdown() }
         }
-        return ok
-    }
-
-    /** 直接用外部合成好的 WAV（base64）。设备上没有可用 TTS 引擎时的通道。 */
-    fun loadWavBase64(b64: String): Boolean {
-        lastError = ""
-        return try {
-            val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
-            val (pcm, rate) = parseWav(bytes)
-            if (pcm.isEmpty()) { lastError = "WAV 解析失败（需要 16bit PCM WAV）"; return false }
-            val resampled = if (rate == TTS_RATE) pcm else resample(pcm, rate, TTS_RATE)
-            pcmFile().writeBytes(resampled)
-            clip = Clip(resampled, TTS_RATE, System.currentTimeMillis())
-            Lg.i("外部语音已载入: ${bytes.size}B WAV (${rate}Hz) -> ${resampled.size}B PCM @${TTS_RATE}Hz")
-            true
-        } catch (t: Throwable) {
-            lastError = "载入外部语音失败: ${t.message}"
-            false
-        }
-    }
-
-    /**
-     * 载入内置的触发词音频（assets/xiaoi_trigger.b64，约 1 秒的"你好"）。
-     *
-     * 用途：小爱只在语音路径下才开放"发消息/打电话"这类能力。
-     * 我们不伪造来源，而是让它正常进入语音路径 —— 只喂一句极短的触发词让 ASR 出结果，
-     * 再由输入层 hook 把识别文本篡改成真正的指令。
-     * 这样既拿到 VoiceButton 来源，又不必让 ASR 去听一整句话。
-     */
-    fun loadTriggerBlip(): Boolean {
-        lastError = ""
-        return try {
-            val txt = PhoneActApp.instance.assets.open("xiaoi_trigger.b64")
-                .use { String(it.readBytes(), Charsets.UTF_8) }.trim()
-            if (txt.isEmpty()) { lastError = "触发词音频为空"; return false }
-            loadWavBase64(txt)
-        } catch (t: Throwable) {
-            lastError = "载入触发词失败: ${t.message}"
-            false
-        }
-    }
-
-    fun clear() {
-        clip = null
-        runCatching { pcmFile().delete() }
     }
 
     // ------------------------------------------------------------------
+    // PC 端 SAPI TTS 服务
+    // ------------------------------------------------------------------
 
-    /** 解析 TTS 输出的 WAV，返回 (单声道16bit PCM, 采样率)。 */
+    private fun synthFromServer(text: String): ByteArray? {
+        val base = Prefs.current.ttsServerUrl.trim().trimEnd('/')
+        if (base.isBlank()) {
+            if (lastError.isEmpty()) lastError = "未配置 TTS 服务器地址，且本机无可用引擎"
+            return null
+        }
+        val url = base + "/tts?rate=" + Prefs.current.ttsRate + "&text=" +
+            java.net.URLEncoder.encode(text, "UTF-8")
+        return try {
+            val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 5000; readTimeout = 20000; requestMethod = "GET"
+            }
+            val code = conn.responseCode
+            if (code != 200) { lastError = "TTS 服务器返回 $code"; conn.disconnect(); return null }
+            val bytes = conn.inputStream.use { it.readBytes() }
+            conn.disconnect()
+            val (pcm, rate) = parseWav(bytes)
+            if (pcm.isEmpty()) { lastError = "服务器 WAV 解析失败"; return null }
+            if (rate == TTS_RATE) pcm else resample(pcm, rate, TTS_RATE)
+        } catch (t: Throwable) {
+            lastError = "访问 TTS 服务器失败: ${t.message}"
+            null
+        }
+    }
+
+    /** 取一段文本的音频（不加入队列），用于连通性自测。 */
+    fun probeServer(text: String): Int {
+        val pcm = synthFromServer(text) ?: return -1
+        return pcm.size
+    }
+
+    // ------------------------------------------------------------------
+    // WAV 解析 / 重采样
+    // ------------------------------------------------------------------
+
     private fun parseWav(b: ByteArray): Pair<ByteArray, Int> {
         if (b.size < 44 || b[0] != 'R'.code.toByte() || b[1] != 'I'.code.toByte()) return ByteArray(0) to 0
         var pos = 12
@@ -190,8 +207,6 @@ object XiaoAiVoice {
             pos = body + sz + (sz and 1)
         }
         if (dataOff < 0 || dataLen <= 0) return ByteArray(0) to 0
-
-        // 统一成单声道 16bit
         val src = b.copyOfRange(dataOff, dataOff + dataLen)
         val mono: ByteArray = when {
             bits == 16 && channels == 1 -> src
@@ -199,11 +214,8 @@ object XiaoAiVoice {
                 val out = ByteArray(src.size / 2)
                 var i = 0; var o = 0
                 while (i + 3 < src.size) {
-                    val l = le16(src, i)
-                    val r = le16(src, i + 2)
-                    val m = ((l + r) / 2)
-                    out[o] = (m and 0xFF).toByte()
-                    out[o + 1] = ((m shr 8) and 0xFF).toByte()
+                    val m = (le16(src, i) + le16(src, i + 2)) / 2
+                    out[o] = (m and 0xFF).toByte(); out[o + 1] = ((m shr 8) and 0xFF).toByte()
                     i += 4; o += 2
                 }
                 out
@@ -211,8 +223,7 @@ object XiaoAiVoice {
             bits == 8 -> ByteArray(src.size * 2).also { out ->
                 for (i in src.indices) {
                     val v = ((src[i].toInt() and 0xFF) - 128) shl 8
-                    out[i * 2] = (v and 0xFF).toByte()
-                    out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+                    out[i * 2] = (v and 0xFF).toByte(); out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
                 }
             }
             else -> src
@@ -220,7 +231,6 @@ object XiaoAiVoice {
         return mono to rate
     }
 
-    /** 线性插值重采样（16bit 单声道）。 */
     private fun resample(pcm: ByteArray, from: Int, to: Int): ByteArray {
         if (from == to || from <= 0 || to <= 0) return pcm
         val inN = pcm.size / 2
@@ -234,15 +244,12 @@ object XiaoAiVoice {
             val s0 = le16(pcm, i0 * 2).toShort().toInt()
             val s1 = le16(pcm, i1 * 2).toShort().toInt()
             val v = (s0 + (s1 - s0) * f).toInt()
-            out[i * 2] = (v and 0xFF).toByte()
-            out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+            out[i * 2] = (v and 0xFF).toByte(); out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
         }
         return out
     }
 
-    private fun le16(b: ByteArray, o: Int): Int =
-        (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8)
-
+    private fun le16(b: ByteArray, o: Int): Int = (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8)
     private fun le32(b: ByteArray, o: Int): Int =
         (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8) or
             ((b[o + 2].toInt() and 0xFF) shl 16) or ((b[o + 3].toInt() and 0xFF) shl 24)

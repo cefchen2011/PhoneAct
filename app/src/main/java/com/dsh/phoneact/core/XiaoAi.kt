@@ -209,19 +209,31 @@ object XiaoAi {
      * 顺序很重要：必须先合成好 PCM（写入 seq），再唤起小爱，
      * 因为注入是在小爱 startRecording 那一刻拉取的。
      */
-    fun askByVoice(instruction: String, waitMs: Long, wavBase64: String? = null): Outcome {
+    fun askByVoice(
+        instruction: String,
+        waitMs: Long,
+        wavBase64: String? = null,
+        followUps: List<String> = emptyList(),
+    ): Outcome {
         if (instruction.isBlank()) return Outcome(false, "input", "指令为空")
         if (!installed()) return Outcome(false, "check", "未安装超级小爱")
         if (!RootShell.available) RootShell.probe()
         if (!RootShell.available) return Outcome(false, "check", "需要 root")
 
         // 优先用外部提供的音频（设备上没有可用 TTS 引擎时的通道），否则走本机 TTS
-        val voiced = if (!wavBase64.isNullOrBlank()) {
-            XiaoAiVoice.loadWavBase64(wavBase64)
+        // 组装语音队列：第 1 轮说指令，后续轮次说"确认"之类（小爱的技能常会追问）
+        XiaoAiVoice.resetQueue()
+        val first = if (!wavBase64.isNullOrBlank()) {
+            XiaoAiVoice.appendFromWavBase64(wavBase64)
         } else {
-            XiaoAiVoice.synthesize(instruction)
+            XiaoAiVoice.appendFromText(instruction)
         }
-        if (!voiced) return Outcome(false, "tts", "语音准备失败: ${XiaoAiVoice.error}")
+        if (!first) return Outcome(false, "tts", "语音准备失败: ${XiaoAiVoice.error}")
+        for (f in followUps) {
+            if (!XiaoAiVoice.appendFromText(f)) {
+                Lg.w("后续轮次语音合成失败「$f」: ${XiaoAiVoice.error}")
+            }
+        }
 
         // 注入是在 startRecording 那一刻拉取的，所以必须保证小爱是"全新一次录音"。
         // 先杀掉旧进程，避免它复用已经开始的录音会话。
@@ -235,19 +247,27 @@ object XiaoAi {
             ?.elements?.map { it.text.trim() }?.filter { it.isNotEmpty() }?.toSet()
             ?: emptySet()
 
-        if (!launch()) return Outcome(false, "launch", "唤起超级小爱失败")
+        // 关键：am start ASSIST 唤起时，origin 是 "android.intent.action.ASSIST&&null"，
+        // 而小爱的"发消息/打电话"等技能只对 origin=VoiceButton 放行 —— 实测就是这个门禁。
+        // 这里在它写 origin 时改成 VoiceButton，等价于"用户按了语音按钮"。
+        setOriginOverride("VoiceButton")
+        try {
+            if (!launch()) return Outcome(false, "launch", "唤起超级小爱失败")
 
-        // 语音是实时喂的：先等播完，再等画面稳定（执行完成），不再固定 sleep
-        val playMs = XiaoAiVoice.durationMs.toLong() + 600
-        val after = waitStable(playMs, waitMs.coerceIn(4000, 60000))
-        val answer = collectAnswer(after, after?.height ?: 2400, before)
-        return Outcome(
-            ok = true,
-            stage = "voice",
-            detail = "已注入语音 #${XiaoAiVoice.seq}（${XiaoAiVoice.durationMs}ms，需 Xposed 生效）",
-            answer = answer,
-            elements = after?.elements?.size ?: 0,
-        )
+            // 语音是实时喂的：先等播完，再等画面稳定（执行完成），不再固定 sleep
+            val playMs = XiaoAiVoice.durationMs.toLong() + 600
+            val after = waitStable(playMs, waitMs.coerceIn(4000, 60000))
+            val answer = collectAnswer(after, after?.height ?: 2400, before)
+            return Outcome(
+                ok = true,
+                stage = "voice",
+                detail = "语音队列 ${XiaoAiVoice.clipCount} 轮，首轮 ${XiaoAiVoice.durationMs}ms + origin 伪装 VoiceButton",
+                answer = answer,
+                elements = after?.elements?.size ?: 0,
+            )
+        } finally {
+            setOriginOverride("")
+        }
     }
 
     // ------------------------------------------------------------------
@@ -338,7 +358,8 @@ object XiaoAi {
         if (!RootShell.available) return Outcome(false, "check", "需要 root")
 
         // 1) 准备触发词音频（喂给麦克风）与待篡改指令（交给输入层 hook）
-        if (!XiaoAiVoice.loadTriggerBlip()) {
+        XiaoAiVoice.resetQueue()
+        if (!XiaoAiVoice.appendTriggerBlip()) {
             return Outcome(false, "blip", "触发词音频载入失败: ${XiaoAiVoice.error}")
         }
         setPendingQuery(instruction)

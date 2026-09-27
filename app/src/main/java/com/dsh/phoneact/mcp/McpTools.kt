@@ -81,6 +81,15 @@ object McpTools {
                     "也可指定要伪造的 QueryOrigin 值，如 VoiceButton", "auto")),
             listOf("instruction"))
 
+        tool("tts_status",
+            "测试 PC 端 TTS 服务是否可用（GET {base}/health），并返回当前配置。" +
+                "superxiaoi 需要语音指令，设备自带 TTS 引擎常不可用，用 PC 的 Windows SAPI 最省事。",
+            JSONObject(), emptyList())
+
+        tool("tts_self_test",
+            "让手机实际去 PC 端 TTS 服务取一段音频并解析，验证整条链路（网络 + WAV 解析）。",
+            JSONObject().put("text", p("string", "测试文本", "语音通道测试")), emptyList())
+
         tool("xiaoi_voice_task",
             "【小爱语音通道】把指令用 TTS 合成成语音，再通过 Xposed 替换小爱进程的麦克风数据喂给它，" +
                 "从而绕过『超级小爱只认语音指令』的限制。用于小爱拒绝文字指令的能力，例如微信/QQ 发消息。" +
@@ -89,8 +98,11 @@ object McpTools {
             JSONObject()
                 .put("instruction", p("string", "要说的那句话，例如：给微信联系人sunshine发消息说你好"))
                 .put("wait_ms", p("integer", "注入后等待小爱执行的毫秒数", 15000))
-                .put("wav_base64", p("string", "可选：外部合成好的 16bit PCM WAV（base64）。" +
-                    "设备上没装可用 TTS 引擎时用它，例如在 PC 端用 SAPI 合成后传进来")),
+                .put("wav_base64", p("string", "可选：外部合成好的 16bit PCM WAV（base64）。一般不用，留空走 TTS"))
+                .put("follow_ups", JSONObject()
+                    .put("type", "array")
+                    .put("description", "后续轮次要说的内容。小爱的技能会多轮追问，默认追加「确认」")
+                    .put("items", JSONObject().put("type", "string"))),
             listOf("instruction"))
 
         tool("xiaoi_inject_log",
@@ -248,6 +260,8 @@ object McpTools {
                 .put("status_bar_height", p("integer", "状态栏高度覆盖，-1 为自动"))
                 .put("nav_bar_height", p("integer", "导航栏高度覆盖，-1 为自动"))
                 .put("debounce_ms", p("integer", "识别去抖毫秒"))
+                .put("tts_server_url", p("string", "PC 端 TTS 服务地址，如 http://192.168.1.80:8518"))
+                .put("tts_rate", p("integer", "TTS 语速 -10..10"))
                 .put("detect_frames", p("boolean", "是否检测输入框/按钮/卡片等框体"))
                 .put("frame_flat_tol", p("integer", "框体分割的亮度容差，越小切得越细"))
                 .put("max_frames", p("integer", "每块最多输出多少个框体"))
@@ -270,6 +284,8 @@ object McpTools {
         when (name) {
             "device_status" -> deviceStatus()
             "xiaoi_status" -> ToolResult.json(XiaoAi.statusJson())
+            "tts_status" -> ttsStatus()
+            "tts_self_test" -> ttsSelfTest(args)
             "xiaoi_act" -> xiaoiAct(args)
             "xiaoi_voice_task" -> xiaoiVoiceTask(args)
             "xiaoi_inject_log" -> ToolResult.text(XiaoAi.injectLog(args.optInt("lines", 40)))
@@ -476,6 +492,39 @@ object McpTools {
         return if (o.ok) ToolResult.json(XiaoAi.outcomeJson(o)) else ToolResult.error("${o.stage}: ${o.detail}")
     }
 
+    private fun ttsStatus(): ToolResult {
+        val url = Prefs.current.ttsServerUrl
+        val o = JSONObject().put("configuredUrl", url).put("rate", Prefs.current.ttsRate)
+        if (url.isBlank()) {
+            o.put("reachable", false).put("hint", "用 settings_set {tts_server_url:\"http://<PC-IP>:8518\"} 配置")
+            return ToolResult.json(o)
+        }
+        return try {
+            val conn = (java.net.URL(url.trimEnd('/') + "/health").openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 4000; readTimeout = 6000; requestMethod = "GET"
+            }
+            val body = conn.inputStream.use { String(it.readBytes(), Charsets.UTF_8) }
+            conn.disconnect()
+            o.put("reachable", true).put("health", body)
+            ToolResult.json(o)
+        } catch (t: Throwable) {
+            o.put("reachable", false).put("error", t.message ?: "连接失败")
+            ToolResult.json(o)
+        }
+    }
+
+    private fun ttsSelfTest(args: JSONObject): ToolResult {
+        val text = args.optString("text", "语音通道测试")
+        val t0 = System.currentTimeMillis()
+        val bytes = com.dsh.phoneact.core.XiaoAiVoice.probeServer(text)
+        return ToolResult.json(JSONObject()
+            .put("ok", bytes > 0)
+            .put("ms", System.currentTimeMillis() - t0)
+            .put("pcmBytes", bytes)
+            .put("durationMs", if (bytes > 0) bytes / 2 * 1000 / 16000 else 0)
+            .put("error", com.dsh.phoneact.core.XiaoAiVoice.error))
+    }
+
     private fun xiaoiAct(args: JSONObject): ToolResult {
         val instruction = args.optString("instruction", "")
         if (instruction.isBlank()) return ToolResult.error("缺少 instruction")
@@ -492,7 +541,10 @@ object McpTools {
         if (instruction.isBlank()) return ToolResult.error("缺少 instruction")
         val waitMs = args.optLong("wait_ms", 15000)
         val wav = args.optString("wav_base64", "").ifBlank { null }
-        val o = XiaoAi.askByVoice(instruction, waitMs, wav)
+        val arr = args.optJSONArray("follow_ups")
+        val followUps = if (arr != null) (0 until arr.length()).mapNotNull { arr.optString(it).ifBlank { null } }
+        else listOf("确认")
+        val o = XiaoAi.askByVoice(instruction, waitMs, wav, followUps)
         Lg.i("xiaoi_voice_task 「$instruction」 -> ${o.stage} ${if (o.ok) "成功" else "失败"}")
         return if (o.ok) ToolResult.json(XiaoAi.outcomeJson(o)) else ToolResult.error("${o.stage}: ${o.detail}")
     }
@@ -590,6 +642,8 @@ object McpTools {
             if (args.has("status_bar_height")) n = n.copy(statusBarHeightOverride = args.getInt("status_bar_height"))
             if (args.has("nav_bar_height")) n = n.copy(navBarHeightOverride = args.getInt("nav_bar_height"))
             if (args.has("debounce_ms")) n = n.copy(debounceMs = args.getLong("debounce_ms").coerceIn(50, 10000))
+            if (args.has("tts_server_url")) n = n.copy(ttsServerUrl = args.getString("tts_server_url").trim())
+            if (args.has("tts_rate")) n = n.copy(ttsRate = args.getInt("tts_rate").coerceIn(-10, 10))
             if (args.has("detect_frames")) n = n.copy(detectFrames = args.getBoolean("detect_frames"))
             if (args.has("frame_flat_tol")) n = n.copy(frameFlatTol = args.getInt("frame_flat_tol").coerceIn(1, 24))
             if (args.has("max_frames")) n = n.copy(maxFrames = args.getInt("max_frames").coerceIn(0, 40))

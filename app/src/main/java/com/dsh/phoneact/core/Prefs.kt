@@ -31,6 +31,11 @@ data class Settings(
     val debounceMs: Long = 350,
     val maxElements: Int = 120,
 
+    // ---- 小爱语音通道 ----
+    /** PC 端 SAPI TTS 服务地址，例如 http://192.168.1.80:8518 。留空表示不用。 */
+    val ttsServerUrl: String = "",
+    val ttsRate: Int = 1,
+
     // ---- 框体检测（输入框/按钮/卡片）----
     val detectFrames: Boolean = true,
     val frameFlatTol: Int = 3,
@@ -57,6 +62,8 @@ data class Settings(
         put("keepOnlyTextElements", keepOnlyTextElements)
         put("debounceMs", debounceMs)
         put("maxElements", maxElements)
+        put("ttsServerUrl", ttsServerUrl)
+        put("ttsRate", ttsRate)
         put("detectFrames", detectFrames)
         put("frameFlatTol", frameFlatTol)
         put("maxFrames", maxFrames)
@@ -102,6 +109,8 @@ object Prefs {
             keepOnlyTextElements = sp.getBoolean("keepOnlyTextElements", d.keepOnlyTextElements),
             debounceMs = sp.getLong("debounceMs", d.debounceMs),
             maxElements = sp.getInt("maxElements", d.maxElements),
+            ttsServerUrl = sp.getString("ttsServerUrl", d.ttsServerUrl) ?: "",
+            ttsRate = sp.getInt("ttsRate", d.ttsRate),
             detectFrames = sp.getBoolean("detectFrames", d.detectFrames),
             frameFlatTol = sp.getInt("frameFlatTol", d.frameFlatTol),
             maxFrames = sp.getInt("maxFrames", d.maxFrames),
@@ -140,6 +149,8 @@ object Prefs {
             putBoolean("keepOnlyTextElements", next.keepOnlyTextElements)
             putLong("debounceMs", next.debounceMs)
             putInt("maxElements", next.maxElements)
+            putString("ttsServerUrl", next.ttsServerUrl)
+            putInt("ttsRate", next.ttsRate)
             putBoolean("detectFrames", next.detectFrames)
             putInt("frameFlatTol", next.frameFlatTol)
             putInt("maxFrames", next.maxFrames)

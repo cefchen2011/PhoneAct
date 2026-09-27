@@ -23,6 +23,9 @@ object VoiceInject {
     private const val AUTHORITY = "com.dsh.phoneact.xiaoi"
     private const val KEY_SEQ = "phoneact_inject_seq"
 
+    /** 当前任务已经喂到第几轮（多轮对话会多次 startRecording）。 */
+    @Volatile private var turnIndex = 0
+
     @Volatile private var pcm: ByteArray? = null
     @Volatile private var cursor = 0
     @Volatile private var loadedSeq = -1L
@@ -42,7 +45,6 @@ object VoiceInject {
 
     fun onStartRecording(rec: AudioRecord?, enc: Int = 2) {
         readCalls.set(0)
-        loadedSeq = -1L
         pcm = null
         cursor = 0
         silenceLeft = 0
@@ -64,12 +66,25 @@ object VoiceInject {
         val bundle = res.call(uri, "meta", null, null) ?: run { lastInfo = "provider 无响应"; return }
         val meta = JSONObject(bundle.getString("meta") ?: "{}")
         val seq = meta.optLong("seq", 0L)
-        if (seq <= 0L || seq == loadedSeq) return
-
-        val raw = readAll(res, Uri.parse("content://$AUTHORITY/pcm")) ?: run {
-            lastInfo = "读取 PCM 失败"; return
+        val count = meta.optInt("count", 0)
+        if (seq <= 0L || count <= 0) return
+        // 新任务 -> 轮次归零；否则沿用进度（小爱的技能多为多轮追问，
+        // 每轮都会重新 startRecording，必须逐轮喂不同的音频）
+        if (seq != loadedSeq) {
+            loadedSeq = seq
+            turnIndex = 0
         }
-        if (raw.isEmpty()) { lastInfo = "PCM 为空"; return }
+        if (turnIndex >= count) {
+            lastInfo = "语音队列已用完（共$count 轮）"
+            return
+        }
+
+        val raw = readAll(res, Uri.parse("content://$AUTHORITY/pcm?i=$turnIndex")) ?: run {
+            lastInfo = "读取第$turnIndex 段失败"; return
+        }
+        if (raw.isEmpty()) { lastInfo = "第$turnIndex 段为空"; return }
+        val thisTurn = turnIndex
+        turnIndex++
 
         val srcRate = meta.optInt("sampleRate", 16000).coerceAtLeast(8000)
         val devRate = runCatching { rec.sampleRate }.getOrDefault(16000).coerceAtLeast(8000)
@@ -89,9 +104,8 @@ object VoiceInject {
         pcm = data
         cursor = 0
         silenceLeft = TAIL_SILENCE_BYTES
-        loadedSeq = seq
-        lastInfo = "已载入语音 ${raw.size}B (${srcRate}Hz) -> 设备 ${devRate}Hz/${channels}ch => ${data.size}B"
-        hookLog(lastInfo)
+        lastInfo = "已载入第 $thisTurn/${count - 1} 轮语音 ${raw.size}B (${srcRate}Hz) -> ${devRate}Hz/${channels}ch"
+        hookLog("[PhoneAct] $lastInfo")
     }
 
     /** 用我们的数据覆盖缓冲区；返回 true 表示已注入。 */
