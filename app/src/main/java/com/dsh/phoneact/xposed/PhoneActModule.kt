@@ -251,7 +251,27 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
                 }
             }.onFailure { log("hook $clsName.$methodName 失败 $it") }
         }
-        // 查询来源（文字 / 语音）—— 小爱的能力门禁很可能看这里
+        // 唤起来源全串：小爱判"要不要交棒微信"看的就是它
+        runCatching {
+            val a6 = XposedHelpers.findClassIfExists("com.xiaomi.voiceassistant.utils.a6", lp.classLoader)
+            if (a6 != null) {
+                for (m in listOf("getWakeUpOrigin", "getQueryOrigin", "getLastQueryOrigin")) {
+                    val set = XposedBridge.hookAllMethods(a6, m, object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val cur = param.result as? String
+                            val ov = QueryInject.wakeOriginOverride
+                            if (ov != null && cur != ov) {
+                                param.result = ov
+                                if (QueryInject.bumpHookCount() % 20L == 1L) log("★ 唤起来源覆盖 -> $ov")
+                            }
+                        }
+                    })
+                    if (!set.isNullOrEmpty()) log("来源读取 hook: a6.$m (${set.size})")
+                }
+            }
+        }.onFailure { log("挂来源读取 hook 失败 $it") }
+
+        // 查询来源（文字 / 语音）—— 小能的另一道门禁
         for ((clsName, methodName) in listOf(
             "com.xiaomi.voiceassistant.utils.a6" to "setQueryOrigin",
             "com.xiaomi.voiceassistant.utils.a6" to "setWakeUpOrigin",

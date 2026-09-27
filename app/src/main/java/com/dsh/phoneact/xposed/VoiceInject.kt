@@ -41,6 +41,17 @@ object VoiceInject {
     // 小爱的录音窗口只有约 5 秒，语音 + 静音必须留有余量
     private const val TAIL_SILENCE_BYTES = 16000 * 2 * 3 / 5   // 约 0.6 秒 @16k/16bit（单声道字节数）
 
+    /**
+     * 前导静音。
+     *
+     * 实测（关键）：直接从头喂语音时，**开头的字会被吞掉** ——
+     *   真人 ASR: 给SUNSHINE发微信说你好
+     *   注入 ASR: SUNSHINE发微信说你好     <- "给" 丢了
+     * 丢首字会改变意图判定，小爱就不会走到"交棒微信"那一步。
+     * 前面垫 0.4 秒静音后首字保留。
+     */
+    private const val LEAD_SILENCE_BYTES = 16000 * 2 * 2 / 5   // 约 0.4 秒
+
     @Volatile private var encoding = 2   // AudioFormat.ENCODING_PCM_16BIT
 
     fun onStartRecording(rec: AudioRecord?, enc: Int = 2) {
@@ -65,6 +76,11 @@ object VoiceInject {
         val uri = Uri.parse("content://$AUTHORITY/meta")
         val bundle = res.call(uri, "meta", null, null) ?: run { lastInfo = "provider 无响应"; return }
         val meta = JSONObject(bundle.getString("meta") ?: "{}")
+        // 动态 hook：没武装就完全不碰麦克风数据
+        if (!meta.optBoolean("armed", false)) {
+            lastInfo = "注入未武装，跳过"
+            return
+        }
         val seq = meta.optLong("seq", 0L)
         val count = meta.optInt("count", 0)
         if (seq <= 0L || count <= 0) return
@@ -101,10 +117,18 @@ object VoiceInject {
         }
         if (channels > 1) data = monoToN(data, channels, encoding)
 
+        // 前置静音：避免开头第一个字被录音启动过程吞掉
+        val lead = ByteArray(LEAD_SILENCE_BYTES * channels)
+        val withLead = ByteArray(lead.size + data.size)
+        System.arraycopy(lead, 0, withLead, 0, lead.size)
+        System.arraycopy(data, 0, withLead, lead.size, data.size)
+        data = withLead
+
         pcm = data
         cursor = 0
         silenceLeft = TAIL_SILENCE_BYTES
-        lastInfo = "已载入第 $thisTurn/${count - 1} 轮语音 ${raw.size}B (${srcRate}Hz) -> ${devRate}Hz/${channels}ch"
+        lastInfo = "已载入第 $thisTurn/${count - 1} 轮语音 ${raw.size}B (${srcRate}Hz) -> ${devRate}Hz/${channels}ch" +
+            "，前置静音 ${LEAD_SILENCE_BYTES / 32}ms 共 ${data.size}B"
         hookLog("[PhoneAct] $lastInfo")
     }
 

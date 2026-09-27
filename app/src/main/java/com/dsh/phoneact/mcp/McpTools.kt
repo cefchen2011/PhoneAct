@@ -110,6 +110,29 @@ object McpTools {
             "让手机实际去 PC 端 TTS 服务取一段音频并解析，验证整条链路（网络 + WAV 解析）。",
             JSONObject().put("text", p("string", "测试文本", "语音通道测试")), emptyList())
 
+        tool("xiaoi_inject_arm",
+            "【动态 hook】武装语音注入：设定要喂给小爱麦克风的语音队列并生效。" +
+                "武装后，**任何**小爱的录音会话都会按轮次自动取用队列（包括你手动双击唤起的）。" +
+                "用完请 xiaoi_inject_disarm 卸下。",
+            JSONObject()
+                .put("texts", JSONObject().put("type", "array")
+                    .put("description", "按轮次排列的文本，例如 [\"给SUNSHINE发微信说你好\", \"确认\"]")
+                    .put("items", JSONObject().put("type", "string")))
+                .put("rate", p("integer", "语速 -10..10", 1)),
+            listOf("texts"))
+
+        tool("xiaoi_inject_disarm", "卸下语音注入（动态 hook 关闭，队列清空）。", JSONObject(), emptyList())
+
+        tool("xiaoi_mic_tap",
+            "点小爱悬浮条上的麦克风图标，开启下一轮语音。**是否补点由你决定** —— " +
+                "典型用法：注入后等一会儿，若页面没跳转就调一次这个再等。",
+            JSONObject(), emptyList())
+
+        tool("xiaoi_observe",
+            "等待一段时间后，返回当前屏幕的判定与文字（verdict / screen）以及本段时间内的 hook 轨迹。" +
+                "**不做任何补点或重试**，由你根据结果决定下一步。",
+            JSONObject().put("wait_ms", p("integer", "等待毫秒", 8000)), emptyList())
+
         tool("xiaoi_voice_task",
             "【小爱语音通道】把指令用 TTS 合成成语音，再通过 Xposed 替换小爱进程的麦克风数据喂给它，" +
                 "从而绕过『超级小爱只认语音指令』的限制。用于小爱拒绝文字指令的能力，例如微信/QQ 发消息。" +
@@ -123,6 +146,7 @@ object McpTools {
                 .put("step_ms", p("integer", "每一步之间的固定等待毫秒（默认 5000）。" +
                     "指令播完等 5s；补点麦克风（重发/确认）后同样等 5s", 5000))
                 .put("max_retry", p("integer", "未跳转时最多补点几次麦克风", 3))
+                .put("origin_override", p("string", "可选：强制伪造 QueryOrigin。默认不覆盖", ""))
                 .put("follow_ups", JSONObject()
                     .put("type", "array")
                     .put("description", "后续轮次要说的内容。小爱的技能会多轮追问，默认追加「确认」")
@@ -314,6 +338,10 @@ object McpTools {
                 com.dsh.phoneact.core.Trace.tail(args.optInt("lines", 60))))
             "tts_status" -> ttsStatus()
             "tts_self_test" -> ttsSelfTest(args)
+            "xiaoi_inject_arm" -> xiaoiInjectArm(args)
+            "xiaoi_inject_disarm" -> { com.dsh.phoneact.core.XiaoAiVoice.disarm(); com.dsh.phoneact.core.XiaoAiVoice.resetQueue(); ToolResult.json(JSONObject().put("ok", true).put("armed", false)) }
+            "xiaoi_mic_tap" -> xiaoiMicTap()
+            "xiaoi_observe" -> xiaoiObserve(args)
             "xiaoi_act" -> xiaoiAct(args)
             "xiaoi_voice_task" -> xiaoiVoiceTask(args)
             "xiaoi_inject_log" -> ToolResult.text(XiaoAi.injectLog(args.optInt("lines", 40)))
@@ -520,6 +548,53 @@ object McpTools {
         return if (o.ok) ToolResult.json(XiaoAi.outcomeJson(o)) else ToolResult.error("${o.stage}: ${o.detail}")
     }
 
+    private fun xiaoiInjectArm(args: JSONObject): ToolResult {
+        val arr = args.optJSONArray("texts") ?: return ToolResult.error("缺少 texts 数组")
+        if (arr.length() == 0) return ToolResult.error("texts 为空")
+        if (args.has("rate")) Prefs.update { it.copy(ttsRate = args.getInt("rate").coerceIn(-10, 10)) }
+        com.dsh.phoneact.core.XiaoAiVoice.resetQueue()
+        val durations = JSONArray()
+        val errors = JSONArray()
+        for (i in 0 until arr.length()) {
+            val t = arr.optString(i, "").trim()
+            if (t.isEmpty()) { durations.put(0); continue }
+            val ok = com.dsh.phoneact.core.XiaoAiVoice.appendFromText(t)
+            if (!ok) errors.put(JSONObject().put("index", i).put("text", t.take(30))
+                .put("error", com.dsh.phoneact.core.XiaoAiVoice.error))
+        }
+        val meta = com.dsh.phoneact.core.XiaoAiVoice.metaJson()
+        val d = meta.optJSONArray("durations") ?: JSONArray()
+        for (i in 0 until d.length()) durations.put(d.optInt(i, 0))
+        if (errors.length() > 0) {
+            return ToolResult.error("部分语音合成失败: " + errors.toString())
+        }
+        com.dsh.phoneact.core.XiaoAiVoice.arm()
+        return ToolResult.json(JSONObject()
+            .put("ok", true)
+            .put("armed", true)
+            .put("clipCount", com.dsh.phoneact.core.XiaoAiVoice.clipCount)
+            .put("durations", durations)
+            .put("hint", "现在可以用任意方式唤起小爱（例如双击底部手势条：ui_tap 两次，" +
+                "x=屏宽/2, y=屏高*0.99），每次录音会自动播下一段"))
+    }
+
+    private fun xiaoiMicTap(): ToolResult {
+        val ok = XiaoAi.tapMicNow()
+        return ToolResult.json(JSONObject().put("ok", ok))
+    }
+
+    private fun xiaoiObserve(args: JSONObject): ToolResult {
+        val waitMs = args.optLong("wait_ms", 8000).coerceIn(500, 60000)
+        val t0 = System.currentTimeMillis()
+        Thread.sleep(waitMs)
+        val m = FrameHub.recognizeNow(true)
+        val o = XiaoAi.inspectScreen(m)
+        o.put("waitedMs", waitMs)
+        o.put("trace", com.dsh.phoneact.core.Trace.format(com.dsh.phoneact.core.Trace.since(t0 - 1500)))
+        o.put("armed", com.dsh.phoneact.core.XiaoAiVoice.armed)
+        return ToolResult.json(o)
+    }
+
     private fun xiaoiTtsSet(args: JSONObject): ToolResult {
         val arr = args.optJSONArray("texts") ?: return ToolResult.error("缺少 texts 数组")
         if (arr.length() == 0) return ToolResult.error("texts 为空")
@@ -605,7 +680,8 @@ object McpTools {
         val usePrepared = args.optBoolean("use_prepared", false)
         val stepMs = args.optLong("step_ms", 5000L).coerceIn(1000L, 30000L)
         val maxRetry = args.optInt("max_retry", 3).coerceIn(0, 6)
-        val o = XiaoAi.askByVoice(instruction, waitMs, wav, followUps, usePrepared, stepMs, maxRetry)
+        val originOv = args.optString("origin_override", "").ifBlank { null }
+        val o = XiaoAi.askByVoice(instruction, waitMs, wav, followUps, usePrepared, stepMs, maxRetry, originOv)
         Lg.i("xiaoi_voice_task 「$instruction」 -> ${o.stage} ${if (o.ok) "成功" else "失败"}")
         return if (o.ok) ToolResult.json(XiaoAi.outcomeJson(o)) else ToolResult.error("${o.stage}: ${o.detail}")
     }

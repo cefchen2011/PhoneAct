@@ -28,6 +28,24 @@ object XiaoAiVoice {
         val durationMs: Int get() = (pcm.size / 2) * 1000 / sampleRate
     }
 
+    /**
+     * 动态 hook 的开关。
+     *
+     * 只有 armed=true 时，被注入进程才会在录音会话里取用语音队列。
+     * 这样 agent 可以"先武装 -> 用任意方式唤起小爱 -> 观察 -> 决定补点 -> 收工卸下"，
+     * 而不是把整条编排流程写死在某个工具里。
+     */
+    @Volatile private var armedFlag: Boolean = false
+
+    val armed: Boolean get() = armedFlag
+
+    fun arm() { armedFlag = true; Lg.i("语音注入已武装（动态 hook 生效）") }
+
+    fun disarm() {
+        armedFlag = false
+        Lg.i("语音注入已卸下")
+    }
+
     /** 当前会话的语音队列；seq 标识"第几次任务"，hook 靠它判断是否要重置轮次。 */
     @Volatile private var clips: List<Clip> = emptyList()
     @Volatile private var seqValue: Long = 0L
@@ -50,6 +68,7 @@ object XiaoAiVoice {
     fun metaJson(): org.json.JSONObject = org.json.JSONObject().apply {
         put("seq", seqValue)
         put("count", clips.size)
+        put("armed", armedFlag)
         put("sampleRate", TTS_RATE)
         put("durations", org.json.JSONArray().apply { clips.forEach { put(it.durationMs) } })
         if (lastError.isNotEmpty()) put("error", lastError)

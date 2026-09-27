@@ -4,6 +4,11 @@ import android.view.KeyEvent
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** 只为了让 core 层能引用到 MCP 运行状态而不产生编译期循环依赖。 */
+object McpServerHolder {
+    @Volatile var running: Boolean = false
+}
+
 /**
  * 超级小爱通道。
  *
@@ -63,21 +68,49 @@ object XiaoAi {
      */
     private fun tapMicIcon(model: ScreenModel?): Boolean {
         val m = model ?: return false
+        // 只接受"足够宽"的框体 —— 实测取到过宽度只有几百像素的假框，
+        // 结果点在 x=256（输入框左侧），等于点了文字输入而不是麦克风。
         val bar = m.elements
-            .filter { it.source == ElementSource.FRAME && it.kind == "input" && it.bounds.top > m.height * 0.65 }
+            .filter {
+                it.source == ElementSource.FRAME && it.kind == "input" &&
+                    it.bounds.top > m.height * 0.65 && it.bounds.width > m.width * 0.6
+            }
             .maxByOrNull { it.bounds.area }
         val x: Int
         val y: Int
         if (bar != null) {
             x = bar.bounds.left + (bar.bounds.width * 768 / 1000)
             y = bar.bounds.centerY
+            Lg.i("麦克风定位: 用框体 " + bar.bounds.left + "," + bar.bounds.top +
+                " " + bar.bounds.width + "x" + bar.bounds.height)
         } else {
-            x = m.width * 3 / 4
-            y = m.height * 93 / 100
+            // 兜底：按屏幕比例。实测 1280 宽屏麦克风约在 75% 处、条中心 93% 处
+            x = m.width * 752 / 1000
+            y = m.height * 932 / 1000
+            Lg.i("麦克风定位: 用比例兜底（未找到合适的悬浮条框体）")
         }
         val r = Actions.tap(x, y)
-        Lg.i("补点麦克风图标 ($x,$y) -> ${r.ok}")
+        Lg.i("补点麦克风图标 (" + x + "," + y + ") -> " + r.ok)
         return r.ok
+    }
+
+    /** 供 MCP 直接调用的"点麦克风"原语：用最近一次识别定位。 */
+    fun tapMicNow(): Boolean {
+        val m = FrameHub.model.value ?: FrameHub.recognizeNow(true)
+        return tapMicIcon(m)
+    }
+
+    /** 供 MCP 直接调用的"看当前结果"原语：只观察，不做任何补点/重试。 */
+    fun inspectScreen(model: ScreenModel?): JSONObject {
+        val m = model ?: FrameHub.recognizeNow(true)
+        val (verdict, hit, screen) = analyzeFinal(m)
+        return JSONObject().apply {
+            put("verdict", verdict)
+            if (hit.isNotEmpty()) put("verdictHit", hit)
+            put("screen", screen)
+            put("elements", m?.elements?.size ?: 0)
+            put("mcpRunning", McpServerHolder.running)
+        }
     }
 
     /** 画面稳定后重新识别一次，给出"是否完成"的判定依据。 */
@@ -154,6 +187,18 @@ object XiaoAi {
     private fun isXiaoAiVisible(): Boolean =
         FrameHub.foregroundPackage == PKG || hasFocusCached()
 
+    /** 双击底部手势条唤起小爱（与真人操作一致的 wake origin）。 */
+    private fun doubleTapGestureLine(): Boolean {
+        val m = FrameHub.model.value
+        val x = (m?.width ?: 1080) / 2
+        val y = ((m?.height ?: 2400) - (m?.height ?: 2400) / 120).coerceAtLeast(1)
+        val a = Actions.tap(x, y)
+        Thread.sleep(80)
+        val b = Actions.tap(x, y)
+        Lg.i("双击手势条唤起 ($x,$y) -> ${a.ok}/${b.ok}")
+        return a.ok && b.ok
+    }
+
     private fun pollXiaoAi(ms: Long): Boolean {
         val t0 = System.currentTimeMillis()
         while (System.currentTimeMillis() - t0 < ms) {
@@ -186,12 +231,29 @@ object XiaoAi {
         return FrameHub.model.value
     }
 
-    /** 唤起超级小爱。返回是否成功把它带到前台。 */
+    /**
+     * 唤起超级小爱。
+     *
+     * **必须优先用"双击底部手势条"** —— 真人基准日志显示，只有这条路产生的
+     * wake origin 带 `double_click_fullscreen_gesture_line` 标记：
+     *   真人: com.miui.voiceassist.ACTION_VOICE_START_VOICEASSIST&&android.intent.action.ASSIST
+     *         &&double_click_fullscreen_gesture_line
+     *   双击: android.intent.action.ASSIST&&double_click_fullscreen_gesture_line   ← 一致
+     * 而 `am start -a android.intent.action.ASSIST` 只有 `...&&null`，小爱不会走到
+     * "交棒微信"那一步（WeChatLanguageControl: Starting voice control 不会出现）。
+     */
     fun launch(): Boolean {
         if (!RootShell.available) RootShell.probe()
         if (!RootShell.available) return false
         focusCacheAt = 0L
         if (isXiaoAiVisible()) return true
+
+        // ① 双击全屏手势条（底部导航条）
+        if (doubleTapGestureLine()) {
+            if (pollXiaoAi(4000)) return true
+        }
+
+        // ② 回退：ASSIST intent（wake origin 会缺标记，能力可能受限）
         RootShell.run("am start -a android.intent.action.ASSIST", 10000)
         if (pollXiaoAi(3000)) return true
         // 有些 ROM 会弹助理选择器，里面会出现"超级小爱悬浮窗"这一项
@@ -288,6 +350,8 @@ object XiaoAi {
         stepMs: Long = 5000L,
         /** 未跳转时最多补点几次麦克风。 */
         maxRetry: Int = 3,
+        /** 显式指定要伪装的 QueryOrigin；null = 不覆盖（推荐，靠双击手势条拿到真实来源）。 */
+        originOverrideForCall: String? = null,
     ): Outcome {
         val callStart = System.currentTimeMillis()
         if (instruction.isBlank()) return Outcome(false, "input", "指令为空")
@@ -325,10 +389,14 @@ object XiaoAi {
             ?.elements?.map { it.text.trim() }?.filter { it.isNotEmpty() }?.toSet()
             ?: emptySet()
 
-        // 关键：am start ASSIST 唤起时，origin 是 "android.intent.action.ASSIST&&null"，
-        // 而小爱的"发消息/打电话"等技能只对 origin=VoiceButton 放行 —— 实测就是这个门禁。
-        // 这里在它写 origin 时改成 VoiceButton，等价于"用户按了语音按钮"。
-        setOriginOverride("VoiceButton")
+        // 注意：**默认不再覆盖 origin**。
+        // 真人基准日志显示：交棒微信(Starting voice control)发生在 setQueryOrigin=VoiceButton **之前**，
+        // 也就是说交棒判断看的是"唤起来源"（双击手势条），而不是后设的 VoiceButton。
+        // 改用双击手势条唤起后，origin 天然就是
+        //   android.intent.action.ASSIST&&double_click_fullscreen_gesture_line
+        // 与真人一致，无需再伪造；强行改成 VoiceButton 反而会破坏它。
+        // 需要时可通过参数显式指定覆盖值。
+        originOverrideForCall?.let { setOriginOverride(it) }
         try {
             if (!launch()) return Outcome(false, "launch", "唤起超级小爱失败")
 
@@ -374,7 +442,7 @@ object XiaoAi {
                 trace = Trace.format(Trace.since(callStart)),
             )
         } finally {
-            setOriginOverride("")
+            if (originOverrideForCall != null) setOriginOverride("")
         }
     }
 
@@ -407,10 +475,16 @@ object XiaoAi {
 
     fun setOriginOverride(v: String) { originOverride = v }
 
+    /** "full" = 把唤起来源补成真人那种完整串。 */
+    @Volatile private var wakeOriginMode: String = "full"
+
+    fun setWakeOriginMode(v: String) { wakeOriginMode = v }
+
     fun pendingJson(): JSONObject = JSONObject()
         .put("seq", pendingSeq)
         .put("text", pendingQuery)
         .put("origin", originOverride)
+        .put("wake_origin", wakeOriginMode)
 
     /** 用文字输入触发，靠输入层 hook 让它被当成语音指令执行。 */
     fun askWithInputHook(instruction: String, waitMs: Long): Outcome {

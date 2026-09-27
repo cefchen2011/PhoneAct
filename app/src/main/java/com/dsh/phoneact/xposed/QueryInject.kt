@@ -58,6 +58,23 @@ object QueryInject {
         return text
     }
 
+    /**
+     * 唤起来源的全串覆盖值。
+     *
+     * 真人基准日志：
+     *   VA_InstructionProcessManager: queryFrom=com.miui.voiceassist.ACTION_VOICE_START_VOICEASSIST
+     *       &&android.intent.action.ASSIST&&double_click_fullscreen_gesture_line
+     * 而程序化双击手势条只能得到
+     *   android.intent.action.ASSIST&&double_click_fullscreen_gesture_line
+     * —— 少掉 ACTION_VOICE_START_VOICEASSIST 前缀，微信技能就不交棒。
+     * 这里在 getter 上把它补全。
+     */
+    const val FULL_WAKE_ORIGIN =
+        "com.miui.voiceassist.ACTION_VOICE_START_VOICEASSIST" +
+            "&&android.intent.action.ASSIST&&double_click_fullscreen_gesture_line"
+
+    @Volatile var wakeOriginOverride: String? = null
+
     /** 需要把 query origin 覆盖成的值（null 表示不覆盖）。 */
     @Volatile private var originOverride: String? = null
 
@@ -91,6 +108,8 @@ object QueryInject {
             originOverride = next
             log("QueryOrigin 覆盖目标刷新为: $next")
         }
+        val wake = o.optString("wake_origin", "")
+        wakeOriginOverride = if (wake == "full") FULL_WAKE_ORIGIN else wake.ifBlank { null }
     }
 
     fun setOriginOverride(v: String?) {
