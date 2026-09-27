@@ -100,7 +100,8 @@ adb forward tcp:8517 tcp:8517
 | --- | --- |
 | 状态 | `device_status` `screen_state` `settings_get` `settings_set` `logs_tail` |
 | 识别 | `screen_recognize` `screen_model` `screen_wait_update` `screen_screenshot` |
-| 操作 | `ui_tap` `ui_tap_text` `ui_long_press` `ui_swipe` `ui_scroll` `ui_drag_path` `ui_set_text` `ui_key` `ui_global` `ui_dump_tree` |
+| 操作 | `ui_tap` `ui_tap_text` `ui_long_press` `ui_swipe` `ui_scroll` `ui_drag_path` `ui_set_text` `ui_key` `ui_global` |
+| 输入 | `ui_clipboard_set` `ui_clipboard_get`（配合 `ui_key paste` 输入中文） `ui_dump_tree` |
 | 应用 | `app_list` `app_launch` `app_stop` `app_current` `app_install` `app_uninstall` |
 | 底层 | `shell_exec`（root） |
 

@@ -5,6 +5,7 @@ import android.util.Base64
 import com.dsh.phoneact.core.Actions
 import com.dsh.phoneact.core.AppOps
 import com.dsh.phoneact.core.Capture
+import com.dsh.phoneact.core.Clipboard
 import com.dsh.phoneact.core.ElementSource
 import com.dsh.phoneact.core.FrameHub
 import com.dsh.phoneact.core.Lg
@@ -139,6 +140,13 @@ object McpTools {
         tool("ui_global", "执行系统全局动作：back / home / recents / notifications / quick_settings / lock_screen。",
             JSONObject().put("action", p("string", "动作名")), listOf("action"))
 
+        tool("ui_clipboard_set",
+            "写入系统剪贴板。用于输入非 ASCII 文本：先 set，再对输入框 ui_key(key=\"279\") 触发粘贴" +
+                "（因为 root 的 input text 不支持中文；部分应用如微信还会屏蔽无障碍节点树）。",
+            JSONObject().put("text", p("string", "要写入剪贴板的文本")), listOf("text"))
+
+        tool("ui_clipboard_get", "读取当前系统剪贴板文本。", JSONObject())
+
         tool("ui_dump_tree", "导出无障碍节点树（含文本、坐标、可点击性）。depth 控制深度。",
             JSONObject().put("depth", p("integer", "最大深度", 25)), emptyList())
 
@@ -216,6 +224,8 @@ object McpTools {
             "ui_set_text" -> op(Actions.setText(args.getString("text")))
             "ui_key" -> uiKey(args)
             "ui_global" -> op(Actions.globalAction(args.getString("action")))
+            "ui_clipboard_set" -> clipboardSet(args)
+            "ui_clipboard_get" -> clipboardGet()
             "ui_dump_tree" -> uiDumpTree(args)
             "app_list" -> appList(args)
             "app_launch" -> op(AppOps.launch(args.getString("package")))
@@ -388,6 +398,17 @@ object McpTools {
         val k = args.getString("key")
         val code = k.toIntOrNull()
         return if (code != null) op(Actions.keyEvent(code)) else op(Actions.keyName(k))
+    }
+
+    private fun clipboardSet(args: JSONObject): ToolResult {
+        val text = args.getString("text")
+        return if (Clipboard.setText(text)) ToolResult.json(JSONObject().put("ok", true).put("length", text.length))
+        else ToolResult.error("写入剪贴板失败")
+    }
+
+    private fun clipboardGet(): ToolResult {
+        val t = Clipboard.getText() ?: return ToolResult.json(JSONObject().put("text", JSONObject.NULL))
+        return ToolResult.json(JSONObject().put("text", t).put("length", t.length))
     }
 
     private fun uiDumpTree(args: JSONObject): ToolResult {

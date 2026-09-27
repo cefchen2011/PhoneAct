@@ -136,3 +136,30 @@ I/LSPosedFramework: [PhoneAct] initZygote path=/data/app/.../base.apk systemServ
 
 `final-verify.mjs` 覆盖 MCP 握手、工具清单、三条通道、分块识别、坐标/色差、截屏、点击/滑动/全局动作、
 等待更新、应用列表、root shell、中文文本输入 —— **19 / 19 通过**。
+---
+
+## 8. 真机实战二：微信自动发消息（含中文）
+
+任务：打开微信，给联系人 sunshine 发送 `first act test/1测`。
+
+| 步骤 | 调用 | 结果 |
+| --- | --- | --- |
+| 1 | `app_launch {package:"com.tencent.mm"}` | 未到前台，改用 `shell_exec {am start -n com.tencent.mm/.ui.LauncherUI}` 成功 |
+| 2 | `screen_recognize` | 会话列表识别出 `Sunshine @[350,1905]` 及消息预览 |
+| 3 | `ui_tap {350,1905}` | 进入对话（标题 `sunshine` / `wxid_9rm8ynpwnzfq22`） |
+| 4 | `ui_dump_tree` | **只返回 1 个节点** —— 微信屏蔽了无障碍节点树，`ui_set_text` 不可用 |
+| 5 | `ui_clipboard_set {text:"first act test/1测"}` | 写入剪贴板成功 |
+| 6 | `ui_tap {576,2628}` + `ui_key {key:"279"}` | 聚焦输入框（`mInputShown=true`）后 KEYCODE_PASTE 粘贴，文本进入输入框，发送按钮出现 |
+| 7 | `ui_tap {1160,1577}` | 消息发出，气泡显示 `first act test/1测` ✅ |
+
+### 这次暴露的三个问题
+
+1. **部分应用屏蔽无障碍树**（微信整窗只暴露 1 个节点）—— 此时 `ui_set_text` 与 `ui_tap_text` 全部失效，
+   必须走「视觉识别定位 + 坐标操作」路线。这正是 PhoneAct 把视觉识别做成一等公民的原因。
+2. **`root input text` 无法输入非 ASCII** —— 中文、emoji 都会失败。
+   解决方案：新增 `ui_clipboard_set` + `KEYCODE_PASTE(279)`，通用且不依赖第三方输入法。
+   （Android 10+ 限制的是后台应用**读**剪贴板，**写**不受限，前台应用读取正常。）
+3. **坐标必须实测，不能靠大致估算** —— 首次点击输入框用的 y=2537 落在输入框上方的分隔带上，
+   既没聚焦也没报错（`input tap` 只要坐标合法就返回成功）。
+   把截图底部裁出来量到实际范围 y∈[2562,2695] 后一次成功。
+   **教训：对"点击成功但界面没变化"的情况，要回看截图量取真实 bounds。**

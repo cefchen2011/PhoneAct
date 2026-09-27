@@ -177,6 +177,9 @@ object Actions {
         "DPAD_LEFT" to KeyEvent.KEYCODE_DPAD_LEFT,
         "DPAD_RIGHT" to KeyEvent.KEYCODE_DPAD_RIGHT,
         "DPAD_CENTER" to KeyEvent.KEYCODE_DPAD_CENTER,
+        "PASTE" to KeyEvent.KEYCODE_PASTE,
+        "COPY" to KeyEvent.KEYCODE_COPY,
+        "CUT" to KeyEvent.KEYCODE_CUT,
         "MOVE_HOME" to KeyEvent.KEYCODE_MOVE_HOME,
         "MOVE_END" to KeyEvent.KEYCODE_MOVE_END,
     )
