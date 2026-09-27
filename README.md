@@ -54,6 +54,17 @@
    无文字但颜色明显不一致的组件作为图标/按钮候选（`source=color`，可用 `keep_only_text_elements` 关闭）。
 5. **无障碍互校** —— 用无障碍节点树补全/校正文本与"可点击性"，IoU>0.3 时合并（`source=accessibility`）。
 
+6. **框体检测**（`detectFrames`）—— 颜色通道只看得到"与整块主色差异大"的元素，
+   对**无文字、低对比度**的控件必然失明：微信聊天输入框与工具条的亮度差只有 **11**（30 vs 41），
+   远低于默认阈值 48。这类控件恰恰是自动化最常要点的目标，因此单独用几何方法补：
+   - 按"相邻像素亮度差 ≤ `frameFlatTol`"做 4 邻域连通域 → 得到若干**平坦区域**；
+   - 按形状筛出实心矩形（填充率 ≥ 0.72、尺寸 ≥ 80×36、面积 ≤ 半屏）；
+   - 按宽高比与位置推断角色：`input`（宽扁实心且位于屏幕顶/底部）/ `button` / `container`；
+   - 输出 `source=frame` + `kind`，可用 `ui_tap_frame {kind:"input"}` 直接点。
+
+   渐变/视频/照片会被切成大量碎块，由形状条件自然过滤。每个元素都带 `kind` 字段：
+   `text` / `icon` / `node` / `input` / `button` / `container`。
+
 ### 1.2 操作
 
 | 需求 | 实现位置 | 说明 |
@@ -100,7 +111,7 @@ adb forward tcp:8517 tcp:8517
 | --- | --- |
 | 状态 | `device_status` `screen_state` `settings_get` `settings_set` `logs_tail` |
 | 识别 | `screen_recognize` `screen_model` `screen_wait_update` `screen_screenshot` |
-| 操作 | `ui_tap` `ui_tap_text` `ui_long_press` `ui_swipe` `ui_scroll` `ui_drag_path` `ui_set_text` `ui_key` `ui_global` |
+| 操作 | `ui_tap` `ui_tap_text` `ui_tap_frame` `ui_long_press` `ui_swipe` `ui_scroll` `ui_drag_path` `ui_set_text` `ui_key` `ui_global` |
 | 输入 | `ui_clipboard_set` `ui_clipboard_get`（配合 `ui_key paste` 输入中文） `ui_dump_tree` |
 | 应用 | `app_list` `app_launch` `app_stop` `app_current` `app_install` `app_uninstall` |
 | 底层 | `shell_exec`（root） |

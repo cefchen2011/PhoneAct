@@ -140,6 +140,16 @@ object McpTools {
         tool("ui_global", "执行系统全局动作：back / home / recents / notifications / quick_settings / lock_screen。",
             JSONObject().put("action", p("string", "动作名")), listOf("action"))
 
+        tool("ui_tap_frame",
+            "点击几何检测出的『框体』—— 没有文字、与背景对比度极低、无障碍树也拿不到的控件" +
+                "（典型：微信/QQ 的聊天输入框、搜索框、空按钮）。" +
+                "kind 取 input / button / container / any，index 从 0 开始。",
+            JSONObject()
+                .put("kind", p("string", "input / button / container / any", "input"))
+                .put("index", p("integer", "同类框体中第几个（从 0 开始）", 0))
+                .put("contains_text", p("string", "可选：只匹配内部包含该文本的框体", "")),
+            emptyList())
+
         tool("ui_clipboard_set",
             "写入系统剪贴板。用于输入非 ASCII 文本：先 set，再对输入框 ui_key(key=\"279\") 触发粘贴" +
                 "（因为 root 的 input text 不支持中文；部分应用如微信还会屏蔽无障碍节点树）。",
@@ -193,6 +203,9 @@ object McpTools {
                 .put("status_bar_height", p("integer", "状态栏高度覆盖，-1 为自动"))
                 .put("nav_bar_height", p("integer", "导航栏高度覆盖，-1 为自动"))
                 .put("debounce_ms", p("integer", "识别去抖毫秒"))
+                .put("detect_frames", p("boolean", "是否检测输入框/按钮/卡片等框体"))
+                .put("frame_flat_tol", p("integer", "框体分割的亮度容差，越小切得越细"))
+                .put("max_frames", p("integer", "每块最多输出多少个框体"))
                 .put("recognize_on_change", p("boolean", "屏幕更新即识别"))
                 .put("action_backend", p("string", "auto / accessibility / root"))
                 .put("capture_backend", p("string", "auto / accessibility / root / media_projection")),
@@ -224,6 +237,7 @@ object McpTools {
             "ui_set_text" -> op(Actions.setText(args.getString("text")))
             "ui_key" -> uiKey(args)
             "ui_global" -> op(Actions.globalAction(args.getString("action")))
+            "ui_tap_frame" -> tapFrame(args)
             "ui_clipboard_set" -> clipboardSet(args)
             "ui_clipboard_get" -> clipboardGet()
             "ui_dump_tree" -> uiDumpTree(args)
@@ -400,6 +414,44 @@ object McpTools {
         return if (code != null) op(Actions.keyEvent(code)) else op(Actions.keyName(k))
     }
 
+    private fun tapFrame(args: JSONObject): ToolResult {
+        val kind = args.optString("kind", "input").lowercase()
+        val index = args.optInt("index", 0)
+        val contains = args.optString("contains_text", "")
+        val model = FrameHub.model.value ?: FrameHub.recognizeNow(true)
+            ?: return ToolResult.error("识别失败：无法截屏")
+        var frames = model.elements.filter { it.source == ElementSource.FRAME }
+        if (kind != "any") frames = frames.filter { it.kind == kind }
+        if (contains.isNotBlank()) {
+            val inside = model.elements.filter { it.source != ElementSource.FRAME && it.text.contains(contains, true) }
+            frames = frames.filter { f -> inside.any { iouRects(it.bounds, f.bounds) > 0.5 } }
+        }
+        if (frames.size <= index) {
+            return ToolResult.error("没有第 $index 个 kind=$kind 的框体（当前共 ${frames.size} 个" +
+                (if (kind == "any") "" else "，全部框体 ${model.elements.count { it.source == ElementSource.FRAME }} 个") + "）")
+        }
+        val f = frames[index]
+        val r = Actions.tap(f.bounds.centerX, f.bounds.centerY)
+        return if (r.ok) {
+            ToolResult.json(JSONObject()
+                .put("ok", true).put("backend", r.backend).put("kind", f.kind)
+                .put("bounds", f.bounds.toJson())
+                .put("center", JSONArray().put(f.bounds.centerX).put(f.bounds.centerY))
+                .put("colorDelta", f.colorDelta))
+        } else {
+            ToolResult.error("命中框体但点击失败: ${r.detail}")
+        }
+    }
+
+    private fun iouRects(a: com.dsh.phoneact.core.Rect2, b: com.dsh.phoneact.core.Rect2): Double {
+        val l = maxOf(a.left, b.left); val t = maxOf(a.top, b.top)
+        val r = minOf(a.right, b.right); val bo = minOf(a.bottom, b.bottom)
+        val inter = maxOf(0, r - l) * maxOf(0, bo - t)
+        if (inter <= 0) return 0.0
+        val union = a.area + b.area - inter
+        return if (union <= 0) 0.0 else inter.toDouble() / union
+    }
+
     private fun clipboardSet(args: JSONObject): ToolResult {
         val text = args.getString("text")
         return if (Clipboard.setText(text)) ToolResult.json(JSONObject().put("ok", true).put("length", text.length))
@@ -455,6 +507,9 @@ object McpTools {
             if (args.has("status_bar_height")) n = n.copy(statusBarHeightOverride = args.getInt("status_bar_height"))
             if (args.has("nav_bar_height")) n = n.copy(navBarHeightOverride = args.getInt("nav_bar_height"))
             if (args.has("debounce_ms")) n = n.copy(debounceMs = args.getLong("debounce_ms").coerceIn(50, 10000))
+            if (args.has("detect_frames")) n = n.copy(detectFrames = args.getBoolean("detect_frames"))
+            if (args.has("frame_flat_tol")) n = n.copy(frameFlatTol = args.getInt("frame_flat_tol").coerceIn(1, 24))
+            if (args.has("max_frames")) n = n.copy(maxFrames = args.getInt("max_frames").coerceIn(0, 40))
             if (args.has("recognize_on_change")) n = n.copy(recognizeOnChange = args.getBoolean("recognize_on_change"))
             if (args.has("action_backend")) n = n.copy(actionBackend = runCatching {
                 com.dsh.phoneact.core.ActionBackend.valueOf(args.getString("action_backend").uppercase())

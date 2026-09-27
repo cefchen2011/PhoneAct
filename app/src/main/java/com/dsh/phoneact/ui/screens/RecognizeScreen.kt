@@ -152,14 +152,17 @@ private fun ElementCard(e: ScreenElement) {
         ElementSource.OCR -> Color(0xFF34D399)
         ElementSource.ACCESSIBILITY -> Color(0xFF60A5FA)
         ElementSource.COLOR -> Color(0xFFFBBF24)
+        ElementSource.FRAME -> if (e.kind == "input") Color(0xFFFF5FD2) else Color(0xFFA78BFA)
+    }
+    val sourceName = when (e.source) {
+        ElementSource.OCR -> "OCR 文字"
+        ElementSource.ACCESSIBILITY -> "无障碍节点"
+        ElementSource.COLOR -> "纯颜色块"
+        ElementSource.FRAME -> "几何框体"
     }
     SectionCard(
-        e.text.ifBlank { "(无文字组件 / 图标)" },
-        subtitle = "${e.id} · ${e.blockId} · 来源 " + when (e.source) {
-            ElementSource.OCR -> "OCR 文字"
-            ElementSource.ACCESSIBILITY -> "无障碍节点"
-            ElementSource.COLOR -> "纯颜色块"
-        },
+        e.text.ifBlank { when (e.kind) { "input" -> "(输入框)"; "button" -> "(按钮)"; "container" -> "(容器)"; else -> "(无文字组件 / 图标)" } },
+        subtitle = "${e.id} · ${e.blockId} · $sourceName · kind=${e.kind}",
     ) {
         Box(
             Modifier

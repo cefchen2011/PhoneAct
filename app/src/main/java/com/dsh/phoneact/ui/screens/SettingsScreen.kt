@@ -53,6 +53,11 @@ fun SettingsScreen() {
             SwitchRow("只保留含文字的元素", "严格按识别依据过滤：颜色不一致 + 有文字", s.keepOnlyTextElements) { v ->
                 Prefs.update { it.copy(keepOnlyTextElements = v) }
             }
+            SwitchRow(
+                "框体检测（输入框/按钮/卡片）",
+                "几何分割出无文字、低对比度的实心矩形。微信输入框与背景亮度差仅 11，颜色通道必漏，靠这个补上",
+                s.detectFrames,
+            ) { v -> Prefs.update { it.copy(detectFrames = v) } }
             Spacer(Modifier.height(8.dp))
             SliderRow("颜色不一致阈值", "${s.colorDeltaThreshold}", s.colorDeltaThreshold.toFloat(), 4f..160f) { v ->
                 Prefs.update { it.copy(colorDeltaThreshold = v.toInt()) }
@@ -68,6 +73,12 @@ fun SettingsScreen() {
             }
             SliderRow("最大元素数", "${s.maxElements}", s.maxElements.toFloat(), 20f..400f) { v ->
                 Prefs.update { it.copy(maxElements = v.toInt()) }
+            }
+            SliderRow("框体分割容差", "${s.frameFlatTol}", s.frameFlatTol.toFloat(), 1f..12f) { v ->
+                Prefs.update { it.copy(frameFlatTol = v.toInt()) }
+            }
+            SliderRow("每块最多框体数", "${s.maxFrames}", s.maxFrames.toFloat(), 0f..30f) { v ->
+                Prefs.update { it.copy(maxFrames = v.toInt()) }
             }
         }
 
@@ -140,6 +151,9 @@ fun SettingsScreen() {
                         navBarHeightOverride = -1,
                         debounceMs = 350,
                         maxElements = 120,
+                        detectFrames = true,
+                        frameFlatTol = 3,
+                        maxFrames = 10,
                         recognizeOnChange = true,
                         actionBackend = ActionBackend.AUTO,
                         captureBackend = CaptureBackend.AUTO,

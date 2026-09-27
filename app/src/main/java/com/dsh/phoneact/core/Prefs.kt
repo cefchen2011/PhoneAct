@@ -31,6 +31,11 @@ data class Settings(
     val debounceMs: Long = 350,
     val maxElements: Int = 120,
 
+    // ---- 框体检测（输入框/按钮/卡片）----
+    val detectFrames: Boolean = true,
+    val frameFlatTol: Int = 3,
+    val maxFrames: Int = 10,
+
     // ---- 操作 ----
     val actionBackend: ActionBackend = ActionBackend.AUTO,
     val defaultTapDelayMs: Long = 120,
@@ -52,6 +57,9 @@ data class Settings(
         put("keepOnlyTextElements", keepOnlyTextElements)
         put("debounceMs", debounceMs)
         put("maxElements", maxElements)
+        put("detectFrames", detectFrames)
+        put("frameFlatTol", frameFlatTol)
+        put("maxFrames", maxFrames)
         put("actionBackend", actionBackend.name)
         put("captureBackend", captureBackend.name)
     }
@@ -94,6 +102,9 @@ object Prefs {
             keepOnlyTextElements = sp.getBoolean("keepOnlyTextElements", d.keepOnlyTextElements),
             debounceMs = sp.getLong("debounceMs", d.debounceMs),
             maxElements = sp.getInt("maxElements", d.maxElements),
+            detectFrames = sp.getBoolean("detectFrames", d.detectFrames),
+            frameFlatTol = sp.getInt("frameFlatTol", d.frameFlatTol),
+            maxFrames = sp.getInt("maxFrames", d.maxFrames),
             actionBackend = runCatching { ActionBackend.valueOf(sp.getString("actionBackend", "AUTO")!!) }.getOrDefault(ActionBackend.AUTO),
             captureBackend = runCatching { CaptureBackend.valueOf(sp.getString("captureBackend", "AUTO")!!) }.getOrDefault(CaptureBackend.AUTO),
         )
@@ -129,6 +140,9 @@ object Prefs {
             putBoolean("keepOnlyTextElements", next.keepOnlyTextElements)
             putLong("debounceMs", next.debounceMs)
             putInt("maxElements", next.maxElements)
+            putBoolean("detectFrames", next.detectFrames)
+            putInt("frameFlatTol", next.frameFlatTol)
+            putInt("maxFrames", next.maxFrames)
             putString("actionBackend", next.actionBackend.name)
             putString("captureBackend", next.captureBackend.name)
         }.apply()

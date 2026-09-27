@@ -119,6 +119,7 @@ object Recognizer {
                         bounds = box,
                         source = ElementSource.OCR,
                         blockId = def.id,
+                        kind = "text",
                         confidence = line.confidence,
                         fgColor = fg,
                         bgColor = bg,
@@ -140,6 +141,7 @@ object Recognizer {
                             bounds = r.rect,
                             source = ElementSource.COLOR,
                             blockId = def.id,
+                            kind = "icon",
                             fgColor = r.fg,
                             bgColor = r.bg,
                             colorDelta = r.delta,
@@ -174,6 +176,7 @@ object Recognizer {
                             bounds = nb,
                             source = ElementSource.ACCESSIBILITY,
                             blockId = def.id,
+                            kind = if (node.editable) "input" else if (node.label.isNotBlank()) "text" else "node",
                             confidence = 0.95f,
                             fgColor = delta.first,
                             bgColor = delta.second,
@@ -184,6 +187,29 @@ object Recognizer {
                         )
                     )
                 }
+            }
+
+            // 6. 框体检测：输入框 / 按钮 / 卡片这类"实心矩形"。
+            //    它们往往没有文字、且与背景对比度很低（微信输入框 Δ 仅 11），
+            //    走颜色阈值通道一定漏，必须用几何方法单独识别。
+            val frames = detectFrames(crop, def.left, def.top, w, h, settings)
+            for (f in frames) {
+                val covered = elements.any { iou(it.bounds, f.rect) > 0.75 }
+                if (covered) continue
+                elements.add(
+                    ScreenElement(
+                        id = "e${++globalIndex}",
+                        text = "",
+                        bounds = f.rect,
+                        source = ElementSource.FRAME,
+                        blockId = def.id,
+                        kind = f.kind,
+                        fgColor = f.fillColor,
+                        bgColor = f.surroundColor,
+                        colorDelta = f.delta,
+                        clickable = f.kind != "container",
+                    )
+                )
             }
 
             val sorted = suppress(elements)
@@ -412,6 +438,183 @@ object Recognizer {
     }
 
     // ------------------------------------------------------------------
+    // 框体检测：把"实心矩形"从画面里切出来
+    //
+    // 为什么单独做：颜色阈值通道的参照物是"整块主色"，只看得到高对比元素。
+    // 微信输入框 与 工具条 的亮度差只有 11（30 vs 41），远低于 colorDeltaThreshold(48)，
+    // 一定会漏。而这类控件恰恰是自动化最常要点的目标。
+    //
+    // 做法：按"相邻像素亮度差 <= tol"做连通域，得到若干平坦区域；
+    // 再按形状筛出实心矩形（填充率高、尺寸合理、不超过半屏）。
+    // 渐变/视频/照片会被切成大量碎块，被形状条件自然过滤掉。
+    // ------------------------------------------------------------------
+
+    private const val FRAME_SCALE = 4
+    private const val FRAME_MIN_W = 80      // 全分辨率像素
+    private const val FRAME_MIN_H = 36
+    private const val FRAME_MIN_FILL = 0.72
+
+    data class FrameBox(
+        val rect: Rect2,
+        val kind: String,
+        val fillColor: Int,
+        val surroundColor: Int,
+        val delta: Int,
+        val fill: Double,
+        val area: Int,
+    )
+
+    private fun detectFrames(
+        crop: Bitmap,
+        offsetX: Int,
+        offsetY: Int,
+        screenW: Int,
+        screenH: Int,
+        settings: Settings,
+    ): List<FrameBox> {
+        if (!settings.detectFrames) return emptyList()
+        if (settings.maxFrames <= 0) return emptyList()
+        if (crop.width < FRAME_MIN_W * 2 || crop.height < FRAME_MIN_H * 2) return emptyList()
+
+        val scale = FRAME_SCALE
+        val sw = max(1, crop.width / scale)
+        val sh = max(1, crop.height / scale)
+        if (sw < 32 || sh < 24) return emptyList()
+
+        val small = if (sw == crop.width && sh == crop.height) crop else Bitmap.createScaledBitmap(crop, sw, sh, true)
+        val n = sw * sh
+        val px = IntArray(n)
+        small.getPixels(px, 0, sw, 0, 0, sw, sh)
+        if (small !== crop) small.recycle()
+
+        val lum = IntArray(n)
+        for (i in 0 until n) {
+            val c = px[i]
+            lum[i] = (((c shr 16) and 0xFF) * 299 + ((c shr 8) and 0xFF) * 587 + (c and 0xFF) * 114) / 1000
+        }
+
+        val tol = settings.frameFlatTol.coerceIn(1, 24)
+        val label = IntArray(n) { -1 }
+        val stack = IntArray(n)
+        val raw = ArrayList<FrameBox>(48)
+        val maxFrameArea = (screenW.toLong() * screenH * 50L) / 100L
+
+        for (start in 0 until n) {
+            if (label[start] >= 0) continue
+            var sp = 0
+            stack[sp++] = start
+            label[start] = start
+            var minX = sw; var maxX = -1; var minY = sh; var maxY = -1
+            var cnt = 0
+            var sr = 0L; var sg = 0L; var sb = 0L
+            while (sp > 0) {
+                val p = stack[--sp]
+                val x = p % sw
+                val y = p / sw
+                cnt++
+                if (x < minX) minX = x
+                if (x > maxX) maxX = x
+                if (y < minY) minY = y
+                if (y > maxY) maxY = y
+                val c = px[p]
+                sr += (c shr 16) and 0xFF; sg += (c shr 8) and 0xFF; sb += c and 0xFF
+                val v = lum[p]
+                if (x > 0 && label[p - 1] < 0 && abs(v - lum[p - 1]) <= tol) { label[p - 1] = start; stack[sp++] = p - 1 }
+                if (x < sw - 1 && label[p + 1] < 0 && abs(v - lum[p + 1]) <= tol) { label[p + 1] = start; stack[sp++] = p + 1 }
+                if (y > 0 && label[p - sw] < 0 && abs(v - lum[p - sw]) <= tol) { label[p - sw] = start; stack[sp++] = p - sw }
+                if (y < sh - 1 && label[p + sw] < 0 && abs(v - lum[p + sw]) <= tol) { label[p + sw] = start; stack[sp++] = p + sw }
+            }
+
+            val left = offsetX + minX * scale
+            val top = offsetY + minY * scale
+            val right = offsetX + min((maxX + 1) * scale, crop.width)
+            val bottom = offsetY + min((maxY + 1) * scale, crop.height)
+            val rect = Rect2(left, top, right, bottom)
+            if (rect.width < FRAME_MIN_W || rect.height < FRAME_MIN_H) continue
+            if (rect.area.toLong() > maxFrameArea) continue
+            val bboxCells = (maxX - minX + 1) * (maxY - minY + 1)
+            val fill = cnt.toDouble() / bboxCells.coerceAtLeast(1)
+            if (fill < FRAME_MIN_FILL) continue
+            raw.add(
+                FrameBox(
+                    rect = rect,
+                    kind = classifyFrame(rect, screenW, screenH, fill),
+                    fillColor = Color.rgb((sr / cnt).toInt(), (sg / cnt).toInt(), (sb / cnt).toInt()),
+                    surroundColor = 0,
+                    delta = 0,
+                    fill = fill,
+                    area = cnt,
+                )
+            )
+        }
+
+        if (raw.isEmpty()) return emptyList()
+
+        // 输入框/按钮优先，其次按面积
+        val ordered = raw.sortedWith(
+            compareBy(
+                { when (it.kind) { "input" -> 0; "button" -> 1; else -> 2 } },
+                { -it.rect.area },
+            )
+        ).take(settings.maxFrames)
+
+        return ordered.map { f ->
+            val surround = surroundColor(crop, f.rect, offsetX, offsetY)
+            f.copy(surroundColor = surround, delta = colorDistance(f.fillColor, surround))
+        }
+    }
+
+    /** 依据宽高比与所在位置推断框体角色。 */
+    private fun classifyFrame(rect: Rect2, screenW: Int, screenH: Int, fill: Double): String {
+        val w = rect.width
+        val h = rect.height
+        if (w <= 0 || h <= 0) return "container"
+        val aspect = w.toDouble() / h
+        val cy = rect.centerY.toDouble() / screenH.coerceAtLeast(1)
+        val areaRatio = (w.toDouble() * h) / (screenW.toDouble() * screenH.coerceAtLeast(1))
+        // 宽扁实心 + 位于屏幕顶部/底部 → 输入框（搜索框 / 聊天输入框）
+        if (aspect >= 2.2 && h <= screenH * 0.10 && fill >= 0.88 && (cy <= 0.18 || cy >= 0.70)) return "input"
+        if (areaRatio <= 0.05 && aspect in 0.8..8.0 && fill >= 0.85) return "button"
+        return "container"
+    }
+
+    /** 采样框体外侧一圈的颜色，作为"周围环境色"，用于算对比度。 */
+    private fun surroundColor(crop: Bitmap, rect: Rect2, offsetX: Int, offsetY: Int, ring: Int = 8): Int {
+        val x0 = (rect.left - offsetX - ring).coerceAtLeast(0)
+        val y0 = (rect.top - offsetY - ring).coerceAtLeast(0)
+        val x1 = (rect.right - offsetX + ring).coerceAtMost(crop.width)
+        val y1 = (rect.bottom - offsetY + ring).coerceAtMost(crop.height)
+        val iw = x1 - x0
+        val ih = y1 - y0
+        if (iw <= 0 || ih <= 0) return 0
+        val buf = IntArray(iw * ih)
+        runCatching { crop.getPixels(buf, 0, iw, x0, y0, iw, ih) }.onFailure { return 0 }
+        val inL = rect.left - offsetX
+        val inT = rect.top - offsetY
+        val inR = rect.right - offsetX
+        val inB = rect.bottom - offsetY
+        var sr = 0L; var sg = 0L; var sb = 0L; var cnt = 0
+        for (yy in 0 until ih) {
+            val gy = y0 + yy
+            if (gy in inT until inB) {
+                for (xx in 0 until iw) {
+                    val gx = x0 + xx
+                    if (gx in inL until inR) continue
+                    val c = buf[yy * iw + xx]
+                    sr += (c shr 16) and 0xFF; sg += (c shr 8) and 0xFF; sb += c and 0xFF; cnt++
+                }
+            } else {
+                for (xx in 0 until iw) {
+                    val c = buf[yy * iw + xx]
+                    sr += (c shr 16) and 0xFF; sg += (c shr 8) and 0xFF; sb += c and 0xFF; cnt++
+                }
+            }
+        }
+        if (cnt == 0) return 0
+        return Color.rgb((sr / cnt).toInt(), (sg / cnt).toInt(), (sb / cnt).toInt())
+    }
+
+    // ------------------------------------------------------------------
     // 单框对比度采样
     // ------------------------------------------------------------------
 
@@ -478,30 +681,22 @@ object Recognizer {
                     when (it.source) {
                         ElementSource.OCR -> 0
                         ElementSource.ACCESSIBILITY -> 1
-                        ElementSource.COLOR -> 2
+                        ElementSource.FRAME -> 2   // 框体只是容器，优先级低于其内部的文字
+                        ElementSource.COLOR -> 3
                     }
                 },
                 { -it.bounds.area },
             )
         )
+        // 只做"近似重复"去重。
+        // 注意：早期版本用"被包含度"(交集/较小者面积)判断，会把"容器"误判成被内部小元素覆盖而整块丢弃
+        // —— 微信输入框就是这样丢的。嵌套是合法结构，不是重复。
         val kept = ArrayList<ScreenElement>(ordered.size)
         for (e in ordered) {
-            // 只对"纯颜色块"做抑制：被更优先的元素覆盖 60% 以上就丢弃
-            val drop = e.source == ElementSource.COLOR && kept.any { k -> containment(k.bounds, e.bounds) > 0.6 }
-            if (!drop) kept.add(e)
+            val dup = kept.any { k -> iou(k.bounds, e.bounds) > 0.75 }
+            if (!dup) kept.add(e)
         }
         return kept
-    }
-
-    /** 交并比之外的"被包含度"：交集 / 较小者面积。 */
-    private fun containment(a: Rect2, b: Rect2): Double {
-        val l = max(a.left, b.left)
-        val t = max(a.top, b.top)
-        val r = min(a.right, b.right)
-        val bo = min(a.bottom, b.bottom)
-        val inter = max(0, r - l) * max(0, bo - t)
-        if (inter <= 0) return 0.0
-        return inter.toDouble() / min(a.area, b.area).coerceAtLeast(1)
     }
 
     // ------------------------------------------------------------------
@@ -569,8 +764,10 @@ object Recognizer {
                 ElementSource.OCR -> 0xFF34D399.toInt()
                 ElementSource.ACCESSIBILITY -> 0xFF60A5FA.toInt()
                 ElementSource.COLOR -> 0xFFFBBF24.toInt()
+                // 框体单独配色，一眼能看出哪些是几何检测出来的
+                ElementSource.FRAME -> if (e.kind == "input") 0xFFFF5FD2.toInt() else 0xFFA78BFA.toInt()
             }
-            stroke.strokeWidth = if (e.text.isNotBlank()) 4f else 2f
+            stroke.strokeWidth = if (e.text.isNotBlank() || e.source == ElementSource.FRAME) 4f else 2f
             canvas.drawRect(
                 e.bounds.left.toFloat(), e.bounds.top.toFloat(),
                 e.bounds.right.toFloat(), e.bounds.bottom.toFloat(), stroke,

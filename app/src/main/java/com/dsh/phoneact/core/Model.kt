@@ -19,8 +19,8 @@ data class Rect2(val left: Int, val top: Int, val right: Int, val bottom: Int) {
     }
 }
 
-/** 元素来源：无障碍节点 / OCR 文字 / 纯颜色块。 */
-enum class ElementSource { ACCESSIBILITY, OCR, COLOR }
+/** 元素来源：无障碍节点 / OCR 文字 / 纯颜色块 / 几何框体。 */
+enum class ElementSource { ACCESSIBILITY, OCR, COLOR, FRAME }
 
 data class ScreenElement(
     val id: String,
@@ -38,6 +38,12 @@ data class ScreenElement(
     val clickable: Boolean = false,
     val editable: Boolean = false,
     val className: String = "",
+    /**
+     * 语义角色：
+     *  text=含文字的组件 / icon=无文字图标 / node=无障碍节点 /
+     *  input=输入框(宽扁实心框) / button=按钮 / container=容器(卡片、气泡、工具条)
+     */
+    val kind: String = "text",
     /** 元素相对屏幕中心的方向，方便模型理解布局: left/center/right + top/middle/bottom */
     val position: String = "",
 ) {
@@ -52,6 +58,7 @@ data class ScreenElement(
         put("fgColor", hex(fgColor))
         put("bgColor", hex(bgColor))
         put("colorDelta", colorDelta)
+        put("kind", kind)
         put("clickable", clickable)
         put("editable", editable)
         if (className.isNotEmpty()) put("className", className)

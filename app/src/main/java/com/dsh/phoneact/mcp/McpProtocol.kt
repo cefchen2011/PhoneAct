@@ -185,6 +185,12 @@ object McpProtocol {
         3. 点击优先用 ui_tap_text(text=...)，它会先走无障碍节点、再回退 OCR 坐标；需要精确坐标时用 ui_tap(x,y)。
         4. 操作后若界面会刷新，用 screen_wait_update 等待，而不是盲目 sleep。
         5. 应用级操作使用 app_launch / app_stop / app_current；需要底层能力时用 shell_exec(root)。
-        元素来源说明：ocr=视觉识别到的文字(判定依据：颜色与背景不一致且含文字)，accessibility=无障碍节点，color=颜色异常但无文字的组件(通常是图标/按钮)。
+        元素来源说明：ocr=视觉识别到的文字(判定依据：颜色与背景不一致且含文字)，accessibility=无障碍节点，
+        color=颜色异常但无文字的组件(通常是图标)，frame=几何检测出的框体(输入框/按钮/卡片，对比度往往极低)。
+        每个元素都带 kind 字段：text / icon / node / input / button / container。
+
+        遇到"输入框点了没反应"或"控件在无障碍树里找不到"（微信、QQ 等会屏蔽无障碍树）时：
+        1) 看 screen_recognize 结果里 kind=input 或 button 的 frame 元素，直接 ui_tap_frame 点击；
+        2) 输入中文/emoji 用 ui_clipboard_set + ui_key(key="paste")，不要指望 root 的 input text。
     """.trimIndent()
 }
