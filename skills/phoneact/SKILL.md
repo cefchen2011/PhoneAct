@@ -98,7 +98,26 @@ xiaoi_trace { lines: 40 }                                            # 3) 需要
 > 因此：**多轮任务的 `texts` 一定要把后续答案排进去**，
 > 最常见的第二段就是 `"确认"`。
 
-### 3.3 要点与坑
+### 3.3 微信发消息的真实机制（真人日志实测）
+
+小爱**不用自己的 ASR 发微信消息**，而是把音频转交给微信：
+
+```
+小爱自己的 ASR: setQueryText("给SUNSHINE发微信说你好")
+  -> VA_WeChatLanguageControl: Starting voice control
+  -> Sending voice buffer to WeChat        （音频转发）
+  -> Load libopen_voice_control_sdk         （微信自己的语音控制）
+  -> com.tencent.mm/.open_voice_control.card.A2ACardActivity
+```
+
+- 音频会被缓存成 `files/weChatLanguageControl/asr.pcm` 再回放给微信，
+  **所以注入一次就能覆盖小爱 + 微信两侧**，不必为微信重复注入。
+- 因此失败时先看**有没有出现 `Starting voice control` / `Sending voice buffer to WeChat`** ——
+  这一步没出现，说明卡在"小爱没交棒给微信"，而不是语音内容不对。
+- 判成功的特征：`A2ACardActivity` 出现后正常收尾。
+- 详见 `docs/XIAOI-BASELINE.md`。
+
+### 3.4 要点与坑
 
 - **来源必须像语音**：小爱按 `QueryOrigin` 做能力门禁 ——
   文字输入框是 `QueryEditBar`（会被拒），语音按钮是 `VoiceButton`（放行）。
