@@ -179,8 +179,19 @@ object McpProtocol {
 
     private val INSTRUCTIONS = """
         你正通过 MCP 控制一台真实的 Android 手机（PhoneAct）。
+        ⚠️ 任务路由（先看这里）：
+        · **优先 xiaoi_task**：查天气/汇率/百科、给某人发消息、设闹钟提醒、打开某 App 的某个功能、
+          点外卖/打车/买票、控制智能家居、翻译、总结屏幕内容。
+          这类任务有语义理解或需要云端/账号能力，『超级小爱』有系统级权限，比逐像素点坐标更快更稳。
+        · 改用 ui_* ：需要精确坐标、批量或循环操作、读取具体控件文本、跨 App 编排，
+          或 xiaoi_task 失败/答非所问时。
+        · 兜底：xiaoi_status 显示不可用时，直接走 ui_* 通道。
+        · 小爱的已知边界（实测）：微信/QQ 的"发消息、打电话、打视频"只接受**语音**指令，文字指令会被拒。
+          这类任务用 ui_* 通道（app_launch + screen_recognize + ui_tap_frame/ui_tap_text + ui_clipboard_set）。
+          小爱答非所问或明确拒绝时，**不要重试**，直接切 ui_*。
+
         推荐工作流：
-        1. 先调用 device_status 确认 root / 无障碍 / 截屏通道是否可用。
+        1. 先调用 device_status 确认 root / 无障碍 / 截屏通道 / 超级小爱 是否可用。
         2. 用 screen_recognize 获取当前屏幕的分块识别结果：每个元素都带有 text、bounds、center([x,y])、colorDelta(颜色与背景的不一致度)。
         3. 点击优先用 ui_tap_text(text=...)，它会先走无障碍节点、再回退 OCR 坐标；需要精确坐标时用 ui_tap(x,y)。
         4. 操作后若界面会刷新，用 screen_wait_update 等待，而不是盲目 sleep。

@@ -14,6 +14,7 @@ import com.dsh.phoneact.core.Recognizer
 import com.dsh.phoneact.core.RootShell
 import com.dsh.phoneact.core.ScreenModel
 import com.dsh.phoneact.core.UiTree
+import com.dsh.phoneact.core.XiaoAi
 import com.dsh.phoneact.service.ActAccessibilityService
 import com.dsh.phoneact.service.CaptureService
 import com.dsh.phoneact.xposed.XposedStatus
@@ -66,7 +67,51 @@ object McpTools {
             if (def != null) put("default", def)
         }
 
-        tool("device_status", "查询设备自动化能力：Root(su)、无障碍服务、Xposed 模块、MCP 服务、截屏通道、当前前台应用。", JSONObject())
+        tool("device_status", "查询设备自动化能力：Root(su)、无障碍服务、Xposed 模块、MCP 服务、截屏通道、超级小爱、当前前台应用。", JSONObject())
+
+        tool("xiaoi_act",
+            "【小爱主力通道】用文字把指令发给超级小爱，但把 QueryOrigin 伪造成 VoiceButton，" +
+                "让它按『语音指令』处理 —— 从而解锁它只对语音开放的能力（微信/QQ 发消息、打电话等）。" +
+                "实测依据：文字输入框的 origin 是 QueryEditBar（会被拒），语音按钮是 VoiceButton（放行）。" +
+                "需要 LSPosed 作用域包含 com.miui.voiceassist。",
+            JSONObject()
+                .put("instruction", p("string", "自然语言指令，例如：给微信联系人sunshine发消息说你好"))
+                .put("wait_ms", p("integer", "等待执行/回答的毫秒数", 12000))
+                .put("origin", p("string", "auto=走语音路径并篡改识别文本（推荐）；" +
+                    "也可指定要伪造的 QueryOrigin 值，如 VoiceButton", "auto")),
+            listOf("instruction"))
+
+        tool("xiaoi_voice_task",
+            "【小爱语音通道】把指令用 TTS 合成成语音，再通过 Xposed 替换小爱进程的麦克风数据喂给它，" +
+                "从而绕过『超级小爱只认语音指令』的限制。用于小爱拒绝文字指令的能力，例如微信/QQ 发消息。" +
+                "需要：已安装小爱 + LSPosed 作用域包含 com.miui.voiceassist + root。" +
+                "失败时用 xiaoi_inject_log 看注入是否生效，再决定是否回退 ui_* 通道。",
+            JSONObject()
+                .put("instruction", p("string", "要说的那句话，例如：给微信联系人sunshine发消息说你好"))
+                .put("wait_ms", p("integer", "注入后等待小爱执行的毫秒数", 15000))
+                .put("wav_base64", p("string", "可选：外部合成好的 16bit PCM WAV（base64）。" +
+                    "设备上没装可用 TTS 引擎时用它，例如在 PC 端用 SAPI 合成后传进来")),
+            listOf("instruction"))
+
+        tool("xiaoi_inject_log",
+            "读取语音注入的诊断日志（LSPosed 模块日志），确认 AudioRecord hook 是否被小爱调用、语音是否载入。",
+            JSONObject().put("lines", p("integer", "返回行数", 40)), emptyList())
+
+        tool("xiaoi_status",
+            "检测『超级小爱』是否可用：是否安装、版本、是否为默认助理、能否唤起。",
+            JSONObject())
+
+        tool("xiaoi_task",
+            "把任务用一句自然语言交给『超级小爱』执行，并返回它的回答。" +
+                "【优先使用】查天气/汇率/百科、给某人发消息、设闹钟提醒、打开某个 App 的某个功能、" +
+                "点外卖/打车/买票、控制智能家居、翻译、总结屏幕 —— 这类有语义或需要云端能力的任务，" +
+                "超级小爱有系统级权限，比逐像素点坐标更快更稳。" +
+                "需要精确坐标、批量循环、读取具体控件、或小爱答非所问时，再改用 ui_* 工具。",
+            JSONObject()
+                .put("instruction", p("string", "自然语言指令，例如：给微信 sunshine 发消息说下午开会"))
+                .put("send", p("boolean", "true=自动发送并等待回答；false=只填入输入框等人工确认", true))
+                .put("wait_ms", p("integer", "发送后等待回答的毫秒数", 8000)),
+            listOf("instruction"))
 
         tool("screen_recognize",
             "对当前屏幕做一次分块识别（状态栏 + 主体 + 导航栏）。识别依据：与背景颜色不一致、且含有文字的组件，输出其屏幕坐标。返回 blocks/elements 结构。",
@@ -224,6 +269,11 @@ object McpTools {
     fun call(name: String, args: JSONObject): ToolResult = try {
         when (name) {
             "device_status" -> deviceStatus()
+            "xiaoi_status" -> ToolResult.json(XiaoAi.statusJson())
+            "xiaoi_act" -> xiaoiAct(args)
+            "xiaoi_voice_task" -> xiaoiVoiceTask(args)
+            "xiaoi_inject_log" -> ToolResult.text(XiaoAi.injectLog(args.optInt("lines", 40)))
+            "xiaoi_task" -> xiaoiTask(args)
             "screen_recognize" -> screenRecognize(args)
             "screen_model" -> screenModelTool()
             "screen_wait_update" -> screenWaitUpdate(args)
@@ -280,6 +330,8 @@ object McpTools {
         o.put("mcp", McpServer.statusJson())
         o.put("frameHub", FrameHub.statusJson())
         o.put("ocr", JSONObject().put("available", com.dsh.phoneact.core.Ocr.available).put("error", com.dsh.phoneact.core.Ocr.lastError))
+        o.put("xiaoai", XiaoAi.statusJson())
+        o.put("xiaoaiVoice", JSONObject().put("hasClip", com.dsh.phoneact.core.XiaoAiVoice.hasClip).put("seq", com.dsh.phoneact.core.XiaoAiVoice.seq))
         o.put("settings", Prefs.current.toJson())
         return ToolResult.json(o)
     }
@@ -412,6 +464,37 @@ object McpTools {
         val k = args.getString("key")
         val code = k.toIntOrNull()
         return if (code != null) op(Actions.keyEvent(code)) else op(Actions.keyName(k))
+    }
+
+    private fun xiaoiTask(args: JSONObject): ToolResult {
+        val instruction = args.optString("instruction", "")
+        if (instruction.isBlank()) return ToolResult.error("缺少 instruction")
+        val send = args.optBoolean("send", true)
+        val waitMs = args.optLong("wait_ms", 8000)
+        val o = XiaoAi.ask(instruction, send, waitMs)
+        Lg.i("xiaoi_task 「$instruction」 -> ${o.stage} ${if (o.ok) "成功" else "失败"}")
+        return if (o.ok) ToolResult.json(XiaoAi.outcomeJson(o)) else ToolResult.error("${o.stage}: ${o.detail}")
+    }
+
+    private fun xiaoiAct(args: JSONObject): ToolResult {
+        val instruction = args.optString("instruction", "")
+        if (instruction.isBlank()) return ToolResult.error("缺少 instruction")
+        val waitMs = args.optLong("wait_ms", 12000)
+        val origin = args.optString("origin", "VoiceButton").ifBlank { "VoiceButton" }
+        val o = if (origin.equals("auto", true)) XiaoAi.askVoiceTamper(instruction, waitMs)
+        else XiaoAi.askAsVoice(instruction, waitMs, origin)
+        Lg.i("xiaoi_act 「$instruction」 -> ${o.stage} ${if (o.ok) "成功" else "失败"}")
+        return if (o.ok) ToolResult.json(XiaoAi.outcomeJson(o)) else ToolResult.error("${o.stage}: ${o.detail}")
+    }
+
+    private fun xiaoiVoiceTask(args: JSONObject): ToolResult {
+        val instruction = args.optString("instruction", "")
+        if (instruction.isBlank()) return ToolResult.error("缺少 instruction")
+        val waitMs = args.optLong("wait_ms", 15000)
+        val wav = args.optString("wav_base64", "").ifBlank { null }
+        val o = XiaoAi.askByVoice(instruction, waitMs, wav)
+        Lg.i("xiaoi_voice_task 「$instruction」 -> ${o.stage} ${if (o.ok) "成功" else "失败"}")
+        return if (o.ok) ToolResult.json(XiaoAi.outcomeJson(o)) else ToolResult.error("${o.stage}: ${o.detail}")
     }
 
     private fun tapFrame(args: JSONObject): ToolResult {

@@ -2,6 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Android 11+ 包可见性：不声明就找不到 TTS 引擎，TextToSpeech 会直接初始化失败 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -82,6 +89,12 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- 把 TTS 合成的语音交给被注入的小爱进程（短时数据，不含隐私） -->
+        <provider
+            android:name=".xposed.XiaoAiAudioProvider"
+            android:authorities="${applicationId}.xiaoi"
+            android:exported="true" />
 
         <!-- 脚本化控制入口：需携带 MCP 令牌 -->
         <receiver

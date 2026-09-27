@@ -46,6 +46,11 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
                 hookForegroundTracking(lp)
                 hookContentUpdates(lp)
                 if (lp.packageName == "com.android.systemui") hookMediaProjectionConsent(lp)
+                // 超级小爱只认语音指令；在框架层替换它的麦克风数据，让它"听到"我们合成的话
+                if (lp.packageName == XIAOI_PACKAGE) {
+                    hookAudioInject(lp)
+                    hookQueryInput(lp)
+                }
             }
         } catch (t: Throwable) {
             lastError = "${lp.packageName}: ${t.message}"
@@ -103,7 +108,217 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     // ------------------------------------------------------------------
-    // 4. MediaProjection 授权弹窗自动确认
+    // 4. 语音注入：替换 AudioRecord 读到的麦克风数据
+    // ------------------------------------------------------------------
+
+    private fun hookAudioInject(lp: XC_LoadPackage.LoadPackageParam) {
+        val cls = XposedHelpers.findClassIfExists("android.media.AudioRecord", lp.classLoader) ?: return
+        XposedHelpers.findAndHookMethod(cls, "startRecording", object : XC_MethodHook() {
+            override fun afterHookedMethod(param: MethodHookParam) {
+                runCatching {
+                    val rec = param.thisObject as? android.media.AudioRecord
+                    val rate = runCatching { rec?.sampleRate }.getOrNull()
+                    val ch = runCatching { rec?.channelCount }.getOrNull()
+                    val fmt = runCatching { rec?.audioFormat }.getOrNull()
+                    val enc = when (fmt) {
+                        android.media.AudioFormat.ENCODING_PCM_8BIT -> "8bit"
+                        android.media.AudioFormat.ENCODING_PCM_16BIT -> "16bit"
+                        android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> "24bit"
+                        android.media.AudioFormat.ENCODING_PCM_32BIT -> "32bit"
+                        android.media.AudioFormat.ENCODING_PCM_FLOAT -> "float32"
+                        else -> "?"
+                    }
+                    val src = runCatching { rec?.audioSource }.getOrNull()
+                    log("AudioRecord.startRecording rate=$rate ch=$ch encoding=$enc($fmt) source=$src")
+                    // 第一次调用时打印调用栈，确认这个录音实例到底是谁在用
+                    if (traceCount < 3) {
+                        traceCount++
+                        log("startRecording 调用栈:\n" + android.util.Log.getStackTraceString(Throwable()))
+                    }
+                    VoiceInject.onStartRecording(rec, fmt ?: android.media.AudioFormat.ENCODING_PCM_16BIT)
+                }.onFailure { log("startRecording hook 异常 $it") }
+            }
+        })
+        XposedHelpers.findAndHookMethod(cls, "stop", object : XC_MethodHook() {
+            override fun afterHookedMethod(param: MethodHookParam) {
+                runCatching { VoiceInject.onStop() }
+            }
+        })
+
+        // byte[]
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                cls, "read", ByteArray::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val n = VoiceInject.readCalls.incrementAndGet()
+                        val buf = param.args[0] as? ByteArray ?: return
+                        val off = (param.args[1] as? Int) ?: 0
+                        val len = (param.args[2] as? Int) ?: return
+                        val ok = VoiceInject.fill(buf, off, len)
+                        if (ok) param.result = len
+                        if (n <= 3 || n % 200 == 0L) {
+                            log("read(byte[]) #$n len=$len realResult=${param.result} injected=$ok ${VoiceInject.lastInfo}")
+                        }
+                    }
+                },
+            )
+        }.onFailure { log("hook read(byte[]) 失败 $it") }
+
+        // short[]
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                cls, "read", ShortArray::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val n = VoiceInject.readCalls.incrementAndGet()
+                        val buf = param.args[0] as? ShortArray ?: return
+                        val off = (param.args[1] as? Int) ?: 0
+                        val len = (param.args[2] as? Int) ?: return
+                        val ok = VoiceInject.fillShorts(buf, off, len)
+                        if (ok) param.result = len
+                        if (n <= 3 || n % 200 == 0L) {
+                            log("read(short[]) #$n len=$len realResult=${param.result} injected=$ok ${VoiceInject.lastInfo}")
+                        }
+                    }
+                },
+            )
+        }.onFailure { log("hook read(short[]) 失败 $it") }
+
+        // ByteBuffer 版本：先只统计，确认是否被使用
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                cls, "read", java.nio.ByteBuffer::class.java, Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val n = VoiceInject.readCalls.incrementAndGet()
+                        if (n <= 3 || n % 200 == 0L) log("read(ByteBuffer,int) #$n result=${param.result}（未注入）")
+                    }
+                },
+            )
+        }.onFailure { log("hook read(ByteBuffer,int) 失败 $it") }
+
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                cls, "read", java.nio.ByteBuffer::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val n = VoiceInject.readCalls.incrementAndGet()
+                        if (n <= 3 || n % 200 == 0L) log("read(ByteBuffer,int,int) #$n result=${param.result}（未注入）")
+                    }
+                },
+            )
+        }.onFailure { log("hook read(ByteBuffer,int,int) 失败 $it") }
+
+        installed.add("AudioRecord(小爱语音注入)")
+        log("已挂载 AudioRecord hook 到 $XIAOI_PACKAGE")
+    }
+
+    // ------------------------------------------------------------------
+    // 5. 输入层注入：改写小爱拿到的 QueryInfo
+    // ------------------------------------------------------------------
+
+    /**
+     * 输入层 hook。
+     *
+     * 上一版只挂 QueryInfo 构造器：结果发现构造时 queryText 还是空的
+     * （小爱是先建一个空 QueryInfo，随后通过 setter / notify 方法填内容），
+     * 所以改为挂"文本入口方法"，在方法调用前直接改写参数。
+     */
+    private fun hookQueryInput(lp: XC_LoadPackage.LoadPackageParam) {
+        // [类名, 方法名]，混淆名随版本变化，找不到就跳过并记日志
+        val targets = listOf(
+            "y00.u0" to "setQueryText",
+            "b20.h" to "notifyQueryText",
+            "b20.h" to "addQueryCard",
+            "b20.h" to "addQueryCardFromEditBar",
+            "com.xiaomi.voiceassistant.u1\$a" to "notifyQueryText",
+            "sh0.n1" to "notifyQueryText",
+        )
+        var hooked = 0
+        for ((clsName, methodName) in targets) {
+            val cls = XposedHelpers.findClassIfExists(clsName, lp.classLoader) ?: continue
+            runCatching {
+                val set = XposedBridge.hookAllMethods(cls, methodName, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        runCatching { onQueryTextEntry(clsName, methodName, param) }
+                            .onFailure { log("QueryText hook 异常 $it") }
+                    }
+                })
+                if (!set.isNullOrEmpty()) {
+                    hooked += set.size
+                    log("输入层 hook: $clsName.$methodName (${set.size} 个重载)")
+                }
+            }.onFailure { log("hook $clsName.$methodName 失败 $it") }
+        }
+        // 查询来源（文字 / 语音）—— 小爱的能力门禁很可能看这里
+        for ((clsName, methodName) in listOf(
+            "com.xiaomi.voiceassistant.utils.a6" to "setQueryOrigin",
+            "com.xiaomi.voiceassistant.utils.a6" to "setWakeUpOrigin",
+            "com.xiaomi.voiceassistant.utils.a6" to "setLastQueryOrigin",
+        )) {
+            val cls = XposedHelpers.findClassIfExists(clsName, lp.classLoader) ?: continue
+            runCatching {
+                val set = XposedBridge.hookAllMethods(cls, methodName, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val v = param.args?.firstOrNull() as? String ?: return
+                        log("QueryOrigin " + methodName + " = " + v)
+                        val override = QueryInject.takeOriginOverride()
+                        if (override != null) {
+                            param.args[0] = override
+                            log("★ QueryOrigin 覆盖 -> " + override)
+                        }
+                    }
+                })
+                if (!set.isNullOrEmpty()) {
+                    hooked += set.size
+                    log("来源 hook: $clsName.$methodName (${set.size})")
+                }
+            }.onFailure { log("hook $clsName.$methodName 失败 $it") }
+        }
+
+        if (hooked > 0) {
+            installed.add("输入层注入($hooked 个入口)")
+            log("已挂载输入层 hook：$hooked 个入口方法")
+        } else {
+            log("未找到任何输入层入口方法，输入层注入不可用")
+        }
+    }
+
+    private fun onQueryTextEntry(clsName: String, methodName: String, param: XC_MethodHook.MethodHookParam) {
+        val args = param.args ?: return
+        val idx = args.indexOfFirst { it is String }
+        if (idx < 0) return
+        val text = args[idx] as String
+        if (text.isEmpty()) return
+
+        // 关键一步：把"来自 AI 输入框"标记清掉，让小爱以为这是语音说出来的。
+        // 实测文字指令会被回绝："微信发消息…当前仅支持语音对话方式"。
+        if (clsName == "y00.u0") {
+            val obj = param.thisObject ?: return
+            val before = runCatching { XposedHelpers.getBooleanField(obj, "d") }.getOrDefault(false)
+            if (before) {
+                XposedHelpers.setBooleanField(obj, "d", false)
+                log("★ 来源伪造：isFromAiInputPage true -> false（" + text.take(30) + "）")
+            }
+        }
+
+        val n = QueryInject.bumpHookCount()
+        if (n <= 20 || n % 20 == 0L) {
+            log("输入入口 #" + n + " " + clsName + "." + methodName + " args[" + idx + "]=" + text.take(60))
+        }
+
+        // 排队里有指令就替换掉，让小爱执行我们的目标而不是触发用的占位词
+        val pending = QueryInject.takePending()
+        if (pending != null) {
+            args[idx] = pending
+            QueryInject.note("已替换 $clsName.$methodName -> ${pending.take(40)}")
+            log("★ 输入层注入：" + clsName + "." + methodName + " [" + text.take(30) + "] -> 「" + pending.take(60) + "」")
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 6. MediaProjection 授权弹窗自动确认
     // ------------------------------------------------------------------
 
     private fun hookMediaProjectionConsent(lp: XC_LoadPackage.LoadPackageParam) {
@@ -228,6 +443,7 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     companion object {
         private const val HOST_PACKAGE = "com.dsh.phoneact"
+        private const val XIAOI_PACKAGE = "com.miui.voiceassist"
         private const val ACTION_XPOSED_EVENT = "com.dsh.phoneact.XPOSED_EVENT"
         private const val EVENT_FOREGROUND = "foreground"
         private const val EVENT_CONTENT = "content"
@@ -242,5 +458,6 @@ class PhoneActModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
         )
 
         @Volatile private var lastReport = 0L
+        @Volatile private var traceCount = 0
     }
 }
