@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PhoneAct</string>
+    <string name="accessibility_label">PhoneAct 屏幕识别与操作</string>
+    <string name="accessibility_description">读取屏幕控件树、执行点击/滑动/文本输入，为 MCP 自动化提供无障碍通道。</string>
+    <string name="xposed_description">PhoneAct · Root/无障碍驱动的手机自动化 MCP 服务（分块识别 + 坐标操作）</string>
+</resources>

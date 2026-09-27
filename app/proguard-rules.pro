@@ -1,0 +1,5 @@
+-keep class com.dsh.phoneact.xposed.** { *; }
+-keep class de.robv.android.xposed.** { *; }
+-keepclassmembers class com.dsh.phoneact.core.** { *; }
+-dontwarn org.nanohttpd.**
+-dontwarn de.robv.android.xposed.**
