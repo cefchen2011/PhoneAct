@@ -55,6 +55,22 @@ object Recognizer {
         val w = src.width
         val h = src.height
 
+        // 息屏/纯色画面：没有可识别内容。直接返回并说明原因，
+        // 同时省掉整轮 OCR（息屏时每帧可省 ~600ms）。
+        if (isBlankFrame(src)) {
+            return ScreenModel(
+                ts = System.currentTimeMillis(),
+                width = w, height = h,
+                frameHash = frameHash, changed = changed, seq = seq,
+                packageName = ctxInfo.packageName, activity = ctxInfo.activity,
+                blocks = emptyList(),
+                ocrMs = 0, colorMs = 0,
+                totalMs = System.currentTimeMillis() - t0,
+                captureBackend = captureBackend,
+                note = "blank_frame: 画面接近纯色（息屏/黑屏/纯色界面），无可识别的颜色不一致文字组件",
+            )
+        }
+
         val blocks = splitBlocks(w, h, settings)
         val a11yNodes = if (com.dsh.phoneact.service.ActAccessibilityService.isConnected) {
             runCatching { UiTree.labeledNodes() }.getOrDefault(emptyList())
@@ -198,6 +214,23 @@ object Recognizer {
             captureBackend = captureBackend,
             note = note,
         )
+    }
+
+    /** 16x16 采样判断是否为近纯色画面。 */
+    private fun isBlankFrame(src: Bitmap): Boolean {
+        if (src.width < 16 || src.height < 16) return false
+        val s = Bitmap.createScaledBitmap(src, 16, 16, false)
+        val px = IntArray(256)
+        s.getPixels(px, 0, 16, 0, 0, 16, 16)
+        if (s !== src) s.recycle()
+        var min = 255
+        var max = 0
+        for (c in px) {
+            val l = (((c shr 16) and 0xFF) * 299 + ((c shr 8) and 0xFF) * 587 + (c and 0xFF) * 114) / 1000
+            if (l < min) min = l
+            if (l > max) max = l
+        }
+        return max - min < 12 && max < 24
     }
 
     // ------------------------------------------------------------------

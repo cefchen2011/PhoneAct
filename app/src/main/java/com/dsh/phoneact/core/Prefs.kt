@@ -69,7 +69,7 @@ object Prefs {
         sp = ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
         _flow.value = read()
         if (_flow.value.mcpAuthToken.isEmpty()) {
-            val token = (1..24).map { "0123456789abcdef".random() }.joinToString("")
+            val token = newToken()
             sp.edit().putString("mcpAuthToken", token).apply()
             _flow.value = _flow.value.copy(mcpAuthToken = token)
         }
@@ -98,6 +98,16 @@ object Prefs {
             captureBackend = runCatching { CaptureBackend.valueOf(sp.getString("captureBackend", "AUTO")!!) }.getOrDefault(CaptureBackend.AUTO),
         )
     }
+
+    /** 生成新的 MCP 访问令牌（旧令牌立即失效）。 */
+    fun regenerateToken(): String {
+        val token = newToken()
+        update { it.copy(mcpAuthToken = token) }
+        Lg.i("MCP 访问令牌已重置")
+        return token
+    }
+
+    private fun newToken(): String = (1..24).map { "0123456789abcdef".random() }.joinToString("")
 
     fun update(block: (Settings) -> Settings) {
         val next = block(_flow.value)
